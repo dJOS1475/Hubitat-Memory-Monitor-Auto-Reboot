@@ -1,18 +1,18 @@
 {
   "packageName": "Memory Monitor & Auto Reboot",
   "author": "Derek Osborn",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "minimumHEVersion": "2.0.0",
   "dateReleased": "2025-12-31",
-  "releaseNotes": "v1.0.0 - First release",
-  "communityLink": "https://community.hubitat.com/t/release-memory-monitor-auto-reboot-application/160272",
-  "drivers": [
+  "apps": [
     {
-      "id": "adde3e52-50ed-4c85-ab5a-786892b8fb71",
+      "id": "75008c0e-a035-4bfb-ad92-fd9c0f690874",
       "name": "Memory Monitor & Auto Reboot",
       "namespace": "dJOS",
       "location": "https://raw.githubusercontent.com/dJOS1475/Hubitat-Memory-Monitor-Auto-Reboot/refs/heads/main/memory-monitor-reboot.groovy",
-      "required": true
+      "required": true,
+      "oauth": false,
+      "primary": false
     }
   ]
 }
