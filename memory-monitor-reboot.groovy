@@ -12,7 +12,7 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.0.0
+ *  Version: 1.0.1
  *  Author: Derek Osborn
  *  Date: 2025-12-31
  */
@@ -35,7 +35,7 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
         section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.0.0"
+            paragraph "<b>Version:</b> 1.0.1"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -53,7 +53,7 @@ def mainPage() {
                 title: "Minimum Free Memory Threshold (MB)", 
                 description: "Reboot when free memory falls below this value",
                 required: true, 
-                defaultValue: 200,
+                defaultValue: 50,
                 range: "10..500"
             
             input "enableAutoReboot", "bool",
@@ -77,19 +77,6 @@ def mainPage() {
                     description: "End of allowed reboot window",
                     required: true
             }
-        }
-        
-        section("Hub Security") {
-            paragraph "If you have Hub Security enabled, provide your credentials below"
-            input "hubUsername", "text",
-                title: "Hub Security Username",
-                description: "Leave blank if Hub Security is not enabled",
-                required: false
-            
-            input "hubPassword", "password",
-                title: "Hub Security Password",
-                description: "Leave blank if Hub Security is not enabled",
-                required: false
         }
         
         section("Monitoring Schedule") {
@@ -242,21 +229,12 @@ def checkMemory() {
 def getMemoryInfo() {
     try {
         // Get memory information using httpGet to the hub's local API
+        // Requests from 127.0.0.1 bypass Hub Security authentication
         def params = [
             uri: "http://127.0.0.1:8080",
             path: "/hub/advanced/freeOSMemory",
             timeout: 5
         ]
-        
-        // Add Basic Auth if hub security credentials are provided
-        if (hubUsername && hubPassword) {
-            def authString = "${hubUsername}:${hubPassword}"
-            def authEncoded = authString.bytes.encodeBase64().toString()
-            params.headers = [
-                "Authorization": "Basic ${authEncoded}"
-            ]
-            logDebug "Using Hub Security credentials for memory check"
-        }
         
         def freeMemKB = null
         
@@ -295,9 +273,6 @@ def getMemoryInfo() {
         }
     } catch (Exception e) {
         log.error "Error getting memory stats: ${e.message}"
-        if (e.message.contains("Unauthorized") || e.message.contains("401")) {
-            log.error "Authentication failed - please check Hub Security credentials"
-        }
     }
     
     return null
@@ -339,6 +314,7 @@ def performReboot(isTest) {
     pauseExecution(2000)
     
     // Reboot the hub using the local API
+    // Requests from 127.0.0.1 bypass Hub Security authentication
     try {
         def params = [
             uri: "http://127.0.0.1:8080",
@@ -346,26 +322,12 @@ def performReboot(isTest) {
             timeout: 5
         ]
         
-        // Add Basic Auth if hub security credentials are provided
-        if (hubUsername && hubPassword) {
-            def authString = "${hubUsername}:${hubPassword}"
-            def authEncoded = authString.bytes.encodeBase64().toString()
-            params.headers = [
-                "Authorization": "Basic ${authEncoded}"
-            ]
-            logDebug "Using Hub Security credentials for reboot"
-        }
-        
         httpPost(params) { resp ->
             log.info "Reboot command sent successfully"
         }
     } catch (Exception e) {
         log.error "Error sending reboot command: ${e.message}"
-        if (e.message.contains("Unauthorized") || e.message.contains("401")) {
-            log.error "Authentication failed - please check Hub Security credentials"
-        } else {
-            log.error "You may need to reboot manually from Settings > Reboot"
-        }
+        log.error "You may need to reboot manually from Settings > Reboot"
     }
 }
 
