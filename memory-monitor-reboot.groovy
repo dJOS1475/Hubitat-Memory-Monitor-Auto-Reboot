@@ -13,24 +13,27 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.0.2
+ *  Version: 1.0.4
  *  Author: Derek Osborn
  *  Date: 2026-01-01
- *  
+ * 
+ *  v1.0.4 - added import url and updated endpoint for reboot with db rebuild
  *  v1.0.2 - Added option to rebuild the Database on reboot
  *  v1.0.1 - removed Hub Security as no longer required
  *  v1.0.0 - First public release
  */
+ */
 
 definition(
     name: "Memory Monitor & Auto Reboot",
-    namespace: "dJOS",
+    namespace: "custom",
     author: "Derek Osborn",
     description: "Monitors hub memory usage and automatically reboots when free memory falls below threshold during configured time window",
     category: "Utility",
     iconUrl: "",
     iconX2Url: "",
-    iconX3Url: ""
+    iconX3Url: "",
+    importUrl: "https://raw.githubusercontent.com/dJOS1475/Hubitat-Memory-Monitor-Auto-Reboot/refs/heads/main/memory-monitor-reboot.groovy"
 )
 
 preferences {
@@ -40,7 +43,7 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
         section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.0.2"
+            paragraph "<b>Version:</b> 1.0.4"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -328,7 +331,7 @@ def performReboot(isTest) {
     // Requests from 127.0.0.1 bypass Hub Security authentication
     try {
         // Determine reboot path based on database rebuild setting
-        def rebootPath = rebuildDatabase ? "/hub/rebuildDatabase" : "/hub/reboot"
+        def rebootPath = rebuildDatabase ? "/hub/rebuildDatabaseAndReboot" : "/hub/reboot"
         
         def params = [
             uri: "http://127.0.0.1:8080",
