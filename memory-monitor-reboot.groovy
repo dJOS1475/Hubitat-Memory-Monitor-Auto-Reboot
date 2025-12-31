@@ -9,17 +9,22 @@
  *  - Configurable minimum free memory threshold
  *  - Configurable reboot time window
  *  - Manual test reboot function
+ *  - Optional database rebuild on reboot
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.0.1
+ *  Version: 1.0.2
  *  Author: Derek Osborn
- *  Date: 2025-12-31
+ *  Date: 2026-01-01
+ *  
+ *  v1.0.2 - Added option to rebuild the Database on reboot
+ *  v1.0.1 - removed Hub Security as no longer required
+ *  v1.0.0 - First public release
  */
 
 definition(
     name: "Memory Monitor & Auto Reboot",
-    namespace: "custom",
+    namespace: "dJOS",
     author: "Derek Osborn",
     description: "Monitors hub memory usage and automatically reboots when free memory falls below threshold during configured time window",
     category: "Utility",
@@ -35,7 +40,7 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
         section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.0.1"
+            paragraph "<b>Version:</b> 1.0.2"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -61,6 +66,11 @@ def mainPage() {
                 description: "Allow app to automatically reboot hub when threshold is reached",
                 defaultValue: false,
                 submitOnChange: true
+            
+            input "rebuildDatabase", "bool",
+                title: "Rebuild Database on Reboot",
+                description: "Perform database rebuild when rebooting (may take longer)",
+                defaultValue: false
         }
         
         if (enableAutoReboot) {
@@ -300,8 +310,9 @@ def performReboot(isTest) {
     
     if (notifyBeforeReboot || isTest) {
         def reason = isTest ? "TEST REBOOT" : "Low Memory (${memInfo?.free} MB free)"
+        def dbAction = rebuildDatabase ? " with Database Rebuild" : ""
         log.warn "═══════════════════════════════════════"
-        log.warn "REBOOTING HUB - Reason: ${reason}"
+        log.warn "REBOOTING HUB${dbAction} - Reason: ${reason}"
         log.warn "═══════════════════════════════════════"
     }
     
@@ -316,14 +327,21 @@ def performReboot(isTest) {
     // Reboot the hub using the local API
     // Requests from 127.0.0.1 bypass Hub Security authentication
     try {
+        // Determine reboot path based on database rebuild setting
+        def rebootPath = rebuildDatabase ? "/hub/rebuildDatabase" : "/hub/reboot"
+        
         def params = [
             uri: "http://127.0.0.1:8080",
-            path: "/hub/reboot",
+            path: rebootPath,
             timeout: 5
         ]
         
         httpPost(params) { resp ->
-            log.info "Reboot command sent successfully"
+            if (rebuildDatabase) {
+                log.info "Database rebuild and reboot command sent successfully"
+            } else {
+                log.info "Reboot command sent successfully"
+            }
         }
     } catch (Exception e) {
         log.error "Error sending reboot command: ${e.message}"
