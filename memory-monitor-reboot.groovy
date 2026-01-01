@@ -22,7 +22,7 @@
  *  v1.0.1 - removed Hub Security as no longer required
  *  v1.0.0 - First public release
  */
- */
+
 
 definition(
     name: "Memory Monitor & Auto Reboot",
