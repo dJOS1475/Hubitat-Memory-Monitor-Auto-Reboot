@@ -2,9 +2,9 @@
 	"packageName": "Memory Monitor & Auto Reboot",
 	"minimumHEVersion": "2.2.1",
 	"author": "Derek Osborn",
-	"version": "1.0.4",
+	"version": "1.0.5",
 	"dateReleased": "2025-12-31",
-	"releaseNotes": "v1.0.4 - added import url and updated endpoint for reboot with db rebuild",
+	"releaseNotes": "v1.0.5 - Added hub uptime display and periodic scheduled reboot feature",
 	"communityLink": "https://community.hubitat.com/t/release-memory-monitor-auto-reboot-application/160272",
 	"apps" : [
 		{
