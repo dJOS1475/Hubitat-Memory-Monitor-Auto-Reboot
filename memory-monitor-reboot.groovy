@@ -10,19 +10,21 @@
  *  - Configurable reboot time window
  *  - Manual test reboot function
  *  - Optional database rebuild on reboot
+ *  - Periodic scheduled reboots (weekly, fortnightly, monthly)
+ *  - Hub uptime display
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.0.4
+ *  Version: 1.0.5
  *  Author: Derek Osborn
  *  Date: 2026-01-01
  * 
- *  v1.0.4 - added import url and updated endpoint for reboot with db rebuild
+ *  v1.0.5 - Added hub uptime display and periodic scheduled reboot feature
+ *  v1.0.4 - Added import url and updated endpoint for reboot with db rebuild
  *  v1.0.2 - Added option to rebuild the Database on reboot
- *  v1.0.1 - removed Hub Security as no longer required
+ *  v1.0.1 - Removed Hub Security as no longer required
  *  v1.0.0 - First public release
  */
-
 
 definition(
     name: "Memory Monitor & Auto Reboot",
@@ -43,7 +45,7 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
         section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.0.4"
+            paragraph "<b>Version:</b> 1.0.5"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -53,6 +55,11 @@ def mainPage() {
                          "<b>Usage:</b> ${memInfo.percentUsed}%"
             } else {
                 paragraph "Unable to retrieve memory information"
+            }
+            
+            def uptime = getHubUptime()
+            if (uptime) {
+                paragraph "<br><b>Hub Uptime:</b> ${uptime}"
             }
         }
         
@@ -89,6 +96,49 @@ def mainPage() {
                     title: "Window End Time", 
                     description: "End of allowed reboot window",
                     required: true
+            }
+        }
+        
+        section("Periodic Reboot Schedule") {
+            input "enablePeriodicReboot", "bool",
+                title: "Enable Periodic Scheduled Reboot",
+                description: "Reboot hub on a regular schedule",
+                defaultValue: false,
+                submitOnChange: true
+            
+            if (enablePeriodicReboot) {
+                input "periodicFrequency", "enum",
+                    title: "Reboot Frequency",
+                    description: "How often to perform scheduled reboot",
+                    options: [
+                        "weekly": "Weekly",
+                        "fortnightly": "Fortnightly (Every 2 weeks)",
+                        "monthly": "Monthly"
+                    ],
+                    required: true,
+                    defaultValue: "weekly"
+                
+                input "periodicDayOfWeek", "enum",
+                    title: "Day of Week",
+                    description: "Which day to perform the reboot",
+                    options: [
+                        "SUN": "Sunday",
+                        "MON": "Monday",
+                        "TUE": "Tuesday",
+                        "WED": "Wednesday",
+                        "THU": "Thursday",
+                        "FRI": "Friday",
+                        "SAT": "Saturday"
+                    ],
+                    required: true,
+                    defaultValue: "SUN"
+                
+                input "periodicRebootTime", "time",
+                    title: "Reboot Time",
+                    description: "Time to perform the scheduled reboot",
+                    required: true
+                
+                paragraph "<i>Note: Periodic reboots will use the database rebuild setting configured above.</i>"
             }
         }
         
@@ -133,8 +183,17 @@ def mainPage() {
             if (state.lastReboot) {
                 paragraph "<b>Last Auto Reboot:</b> ${new Date(state.lastReboot).format('yyyy-MM-dd HH:mm:ss')}"
             }
+            if (state.lastPeriodicReboot) {
+                paragraph "<b>Last Periodic Reboot:</b> ${new Date(state.lastPeriodicReboot).format('yyyy-MM-dd HH:mm:ss')}"
+            }
+            if (state.nextPeriodicReboot && enablePeriodicReboot) {
+                paragraph "<b>Next Scheduled Reboot:</b> ${new Date(state.nextPeriodicReboot).format('yyyy-MM-dd HH:mm:ss')}"
+            }
             if (state.rebootCount) {
                 paragraph "<b>Total Auto Reboots:</b> ${state.rebootCount}"
+            }
+            if (state.periodicRebootCount) {
+                paragraph "<b>Total Periodic Reboots:</b> ${state.periodicRebootCount}"
             }
         }
     }
@@ -159,6 +218,7 @@ def uninstalled() {
 
 def initialize() {
     state.rebootCount = state.rebootCount ?: 0
+    state.periodicRebootCount = state.periodicRebootCount ?: 0
     
     // Schedule memory checks based on configured interval
     def interval = (checkInterval ?: "15").toInteger()
@@ -193,6 +253,11 @@ def initialize() {
         log.info "Auto-reboot enabled for time window: ${rebootStartTime} to ${rebootEndTime}"
     } else {
         log.info "Auto-reboot is DISABLED"
+    }
+    
+    // Schedule periodic reboots
+    if (enablePeriodicReboot && periodicDayOfWeek && periodicRebootTime) {
+        schedulePeriodicReboot()
     }
     
     // Do an initial check
@@ -291,6 +356,57 @@ def getMemoryInfo() {
     return null
 }
 
+def getHubUptime() {
+    try {
+        def params = [
+            uri: "http://127.0.0.1:8080",
+            path: "/hub/advanced/freeOSMemoryHistory",
+            timeout: 5
+        ]
+        
+        def historyData = null
+        
+        httpGet(params) { resp ->
+            if (resp.success) {
+                historyData = resp.data.text
+            }
+        }
+        
+        if (historyData != null) {
+            // Parse CSV data - skip header line and count data lines
+            def lines = historyData.split('\n')
+            def dataLines = lines.findAll { line -> 
+                line.trim() && !line.startsWith('Date/time')
+            }
+            
+            if (dataLines.size() > 0) {
+                // Each line represents a 5-minute sample
+                def uptimeMinutes = dataLines.size() * 5
+                
+                def days = (uptimeMinutes / 1440) as int
+                def hours = ((uptimeMinutes % 1440) / 60) as int
+                def minutes = (uptimeMinutes % 60) as int
+                
+                def uptimeStr = ""
+                if (days > 0) {
+                    uptimeStr += "${days} day${days != 1 ? 's' : ''}, "
+                }
+                if (hours > 0 || days > 0) {
+                    uptimeStr += "${hours} hour${hours != 1 ? 's' : ''}, "
+                }
+                uptimeStr += "${minutes} minute${minutes != 1 ? 's' : ''}"
+                
+                return uptimeStr
+            }
+        }
+    } catch (Exception e) {
+        log.error "Error getting uptime from memory history: ${e.message}"
+        logDebug "Uptime error details: ${e}"
+    }
+    
+    return null
+}
+
 def isWithinRebootWindow() {
     if (!rebootStartTime || !rebootEndTime) {
         return false
@@ -349,6 +465,110 @@ def performReboot(isTest) {
     } catch (Exception e) {
         log.error "Error sending reboot command: ${e.message}"
         log.error "You may need to reboot manually from Settings > Reboot"
+    }
+}
+
+def schedulePeriodicReboot() {
+    // Calculate next reboot time
+    def rebootTime = timeToday(periodicRebootTime, location.timeZone)
+    def now = new Date()
+    def nextReboot = rebootTime
+    
+    // If the reboot time has already passed today, schedule for next occurrence
+    if (nextReboot <= now) {
+        use(groovy.time.TimeCategory) {
+            nextReboot = nextReboot + 1.day
+        }
+    }
+    
+    // Adjust for day of week
+    def calendar = Calendar.getInstance(location.timeZone)
+    calendar.setTime(nextReboot)
+    
+    def targetDayOfWeek = getDayOfWeekNumber(periodicDayOfWeek)
+    def currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
+    
+    def daysToAdd = targetDayOfWeek - currentDayOfWeek
+    if (daysToAdd < 0) {
+        daysToAdd += 7
+    }
+    
+    calendar.add(Calendar.DAY_OF_MONTH, daysToAdd)
+    nextReboot = calendar.time
+    
+    // Store next reboot time
+    state.nextPeriodicReboot = nextReboot.time
+    
+    // Schedule the reboot
+    runOnce(nextReboot, performPeriodicReboot)
+    
+    log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (${periodicFrequency})"
+}
+
+def performPeriodicReboot() {
+    log.warn "═══════════════════════════════════════"
+    log.warn "PERFORMING PERIODIC SCHEDULED REBOOT"
+    log.warn "Frequency: ${periodicFrequency}"
+    log.warn "═══════════════════════════════════════"
+    
+    state.lastPeriodicReboot = now()
+    state.periodicRebootCount = (state.periodicRebootCount ?: 0) + 1
+    
+    // Pause briefly to ensure log message is written
+    pauseExecution(2000)
+    
+    // Reboot the hub
+    try {
+        def rebootPath = rebuildDatabase ? "/hub/rebuildDatabaseAndReboot" : "/hub/reboot"
+        
+        def params = [
+            uri: "http://127.0.0.1:8080",
+            path: rebootPath,
+            timeout: 5
+        ]
+        
+        httpPost(params) { resp ->
+            if (rebuildDatabase) {
+                log.info "Database rebuild and reboot command sent successfully"
+            } else {
+                log.info "Reboot command sent successfully"
+            }
+        }
+    } catch (Exception e) {
+        log.error "Error sending periodic reboot command: ${e.message}"
+    }
+    
+    // Schedule next periodic reboot based on frequency
+    def daysUntilNext = 7 // weekly by default
+    
+    switch(periodicFrequency) {
+        case "fortnightly":
+            daysUntilNext = 14
+            break
+        case "monthly":
+            daysUntilNext = 28 // Approximate month
+            break
+        default:
+            daysUntilNext = 7
+    }
+    
+    def nextReboot = new Date(state.nextPeriodicReboot + (daysUntilNext * 24 * 60 * 60 * 1000))
+    state.nextPeriodicReboot = nextReboot.time
+    runOnce(nextReboot, performPeriodicReboot)
+    
+    log.info "Next periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')}"
+}
+
+def getDayOfWeekNumber(dayCode) {
+    switch(dayCode) {
+        case "SUN": return Calendar.SUNDAY
+        case "MON": return Calendar.MONDAY
+        case "TUE": return Calendar.TUESDAY
+        case "WED": return Calendar.WEDNESDAY
+        case "THU": return Calendar.THURSDAY
+        case "FRI": return Calendar.FRIDAY
+        case "SAT": return Calendar.SATURDAY
+        default: return Calendar.SUNDAY
     }
 }
 
