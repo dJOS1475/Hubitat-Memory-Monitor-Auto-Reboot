@@ -26,7 +26,7 @@
 
 definition(
     name: "Memory Monitor & Auto Reboot",
-    namespace: "custom",
+    namespace: "dJOS",
     author: "Derek Osborn",
     description: "Monitors hub memory usage and automatically reboots when free memory falls below threshold during configured time window",
     category: "Utility",
