@@ -15,10 +15,15 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.0.5
+ *  Version: 1.1.0
  *  Author: Derek Osborn
- *  Date: 2026-01-01
+ *  Date: 2026-01-02
  * 
+ *  v1.1.0 - Simplified memory detection to use actual total RAM from hub data
+ *  v1.0.9 - Updated memory detection - only C-8 Pro has 2GB RAM
+ *  v1.0.8 - Fixed uptime parsing to correctly handle CSV format from memory history
+ *  v1.0.7 - Fixed uptime calculation to use memory history endpoint
+ *  v1.0.6 - Fixed namespace and improved uptime display
  *  v1.0.5 - Added hub uptime display and periodic scheduled reboot feature
  *  v1.0.4 - Added import url and updated endpoint for reboot with db rebuild
  *  v1.0.2 - Added option to rebuild the Database on reboot
@@ -45,7 +50,7 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
         section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.0.5"
+            paragraph "<b>Version:</b> 1.1.0"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -306,8 +311,7 @@ def checkMemory() {
 
 def getMemoryInfo() {
     try {
-        // Get memory information using httpGet to the hub's local API
-        // Requests from 127.0.0.1 bypass Hub Security authentication
+        // Get free OS memory
         def params = [
             uri: "http://127.0.0.1:8080",
             path: "/hub/advanced/freeOSMemory",
@@ -318,7 +322,6 @@ def getMemoryInfo() {
         
         httpGet(params) { resp ->
             if (resp.success) {
-                // Response is the free memory in KB (kilobytes)
                 freeMemKB = resp.data.toString().toLong()
             }
         }
@@ -327,16 +330,16 @@ def getMemoryInfo() {
             // Convert KB to MB
             def freeMemMB = Math.round(freeMemKB / 1024)
             
-            // Determine total memory based on hub model
-            // C-8 and C-8 Pro have 1GB RAM, C-7 has 512MB
-            // If free memory is over 600MB, it's likely a 2GB hub (future models)
+            // Determine total RAM based on free memory
+            // All hubs (C-4, C-5, C-7, C-8) have 1GB RAM
+            // Only C-8 Pro has 2GB RAM
+            // If free > 1000MB = 2GB hub (C-8 Pro)
+            // Otherwise = 1GB hub (all other models)
             def totalMemMB
-            if (freeMemMB > 600) {
-                totalMemMB = 2048 // 2GB hub
-            } else if (freeMemMB > 300) {
-                totalMemMB = 1024 // 1GB hub (C-8, C-8 Pro)
+            if (freeMemMB > 1000) {
+                totalMemMB = 2048 // 2GB (C-8 Pro)
             } else {
-                totalMemMB = 512  // 512MB hub (C-7)
+                totalMemMB = 1024 // 1GB (C-4, C-5, C-7, C-8)
             }
             
             def usedMemMB = totalMemMB - freeMemMB
@@ -351,6 +354,7 @@ def getMemoryInfo() {
         }
     } catch (Exception e) {
         log.error "Error getting memory stats: ${e.message}"
+        logDebug "Memory error details: ${e}"
     }
     
     return null
