@@ -311,35 +311,52 @@ def checkMemory() {
 
 def getMemoryInfo() {
     try {
-        // Get free OS memory
+        // Get memory information from history endpoint
         def params = [
             uri: "http://127.0.0.1:8080",
-            path: "/hub/advanced/freeOSMemory",
+            path: "/hub/advanced/freeOSMemoryHistory",
             timeout: 5
         ]
         
         def freeMemKB = null
+        def totalMemKB = null
         
         httpGet(params) { resp ->
             if (resp.success) {
-                freeMemKB = resp.data.toString().toLong()
+                String historyData = resp.data.text
+                def lines = historyData.split('\n')
+                
+                // Get the last data line (skip header)
+                // Format: Date/time,Free OS,5m CPU avg,Total Java,Free Java,Direct Java
+                def dataLines = lines.findAll { line -> 
+                    line.trim() && !line.startsWith('Date/time')
+                }
+                
+                if (dataLines.size() > 0) {
+                    def lastLine = dataLines.last()
+                    def values = lastLine.split(',')
+                    
+                    if (values.size() >= 4) {
+                        // Column 1 = Free OS memory (KB)
+                        freeMemKB = values[1].trim().toLong()
+                        // Column 3 = Total Java memory (KB)
+                        totalMemKB = values[3].trim().toLong()
+                    }
+                }
             }
         }
         
-        if (freeMemKB != null) {
+        if (freeMemKB != null && totalMemKB != null) {
             // Convert KB to MB
             def freeMemMB = Math.round(freeMemKB / 1024)
             
-            // Determine total RAM based on free memory
-            // All hubs (C-4, C-5, C-7, C-8) have 1GB RAM
-            // Only C-8 Pro has 2GB RAM
-            // If free > 1000MB = 2GB hub (C-8 Pro)
-            // Otherwise = 1GB hub (all other models)
+            // Determine total OS RAM based on free memory
+            // Only C-8 Pro has 2GB, all others have 1GB
             def totalMemMB
             if (freeMemMB > 1000) {
                 totalMemMB = 2048 // 2GB (C-8 Pro)
             } else {
-                totalMemMB = 1024 // 1GB (C-4, C-5, C-7, C-8)
+                totalMemMB = 1024 // 1GB (all other hubs)
             }
             
             def usedMemMB = totalMemMB - freeMemMB
