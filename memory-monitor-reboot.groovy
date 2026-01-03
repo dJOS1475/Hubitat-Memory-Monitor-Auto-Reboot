@@ -73,7 +73,7 @@ def mainPage() {
                 title: "Minimum Free Memory Threshold (MB)", 
                 description: "Reboot when free memory falls below this value",
                 required: true, 
-                defaultValue: 50,
+                defaultValue: 200,
                 range: "10..500"
             
             input "enableAutoReboot", "bool",
