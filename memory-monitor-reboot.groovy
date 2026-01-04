@@ -15,10 +15,11 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.1.1
+ *  Version: 1.1.2
  *  Author: Derek Osborn
  *  Date: 2026-01-05
  * 
+ *  v1.1.2 - Fixed reboot endpoint HTTP method calls
  *  v1.1.1 - Fixed periodic reboot scheduling to properly calculate next occurrence
  *  v1.1.0 - Simplified memory detection to use actual total RAM from hub data
  *  v1.0.9 - Updated memory detection - only C-8 Pro has 2GB RAM
@@ -51,7 +52,7 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
         section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.1.1"
+            paragraph "<b>Version:</b> 1.1.2"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -468,19 +469,28 @@ def performReboot(isTest) {
     // Reboot the hub using the local API
     // Requests from 127.0.0.1 bypass Hub Security authentication
     try {
-        // Determine reboot path based on database rebuild setting
-        def rebootPath = rebuildDatabase ? "/hub/rebuildDatabaseAndReboot" : "/hub/reboot"
-        
-        def params = [
-            uri: "http://127.0.0.1:8080",
-            path: rebootPath,
-            timeout: 5
-        ]
-        
-        httpPost(params) { resp ->
-            if (rebuildDatabase) {
+        if (rebuildDatabase) {
+            // Use POST with form data for database rebuild
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/reboot",
+                    headers: [
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    ],
+                    body: [rebuildDatabase: "true"]
+                ]
+            ) { resp ->
                 log.info "Database rebuild and reboot command sent successfully"
-            } else {
+            }
+        } else {
+            // Simple POST for regular reboot
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/reboot"
+                ]
+            ) { resp ->
                 log.info "Reboot command sent successfully"
             }
         }
@@ -578,18 +588,28 @@ def performPeriodicReboot() {
     
     // Reboot the hub
     try {
-        def rebootPath = rebuildDatabase ? "/hub/rebuildDatabaseAndReboot" : "/hub/reboot"
-        
-        def params = [
-            uri: "http://127.0.0.1:8080",
-            path: rebootPath,
-            timeout: 5
-        ]
-        
-        httpPost(params) { resp ->
-            if (rebuildDatabase) {
+        if (rebuildDatabase) {
+            // Use POST with form data for database rebuild
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/reboot",
+                    headers: [
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    ],
+                    body: [rebuildDatabase: "true"]
+                ]
+            ) { resp ->
                 log.info "Database rebuild and reboot command sent successfully"
-            } else {
+            }
+        } else {
+            // Simple POST for regular reboot
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/reboot"
+                ]
+            ) { resp ->
                 log.info "Reboot command sent successfully"
             }
         }
