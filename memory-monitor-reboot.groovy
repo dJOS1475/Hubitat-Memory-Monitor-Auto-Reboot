@@ -15,10 +15,11 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.1.0
+ *  Version: 1.1.1
  *  Author: Derek Osborn
- *  Date: 2026-01-02
+ *  Date: 2026-01-05
  * 
+ *  v1.1.1 - Fixed periodic reboot scheduling to properly calculate next occurrence
  *  v1.1.0 - Simplified memory detection to use actual total RAM from hub data
  *  v1.0.9 - Updated memory detection - only C-8 Pro has 2GB RAM
  *  v1.0.8 - Fixed uptime parsing to correctly handle CSV format from memory history
@@ -50,7 +51,7 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
         section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.1.0"
+            paragraph "<b>Version:</b> 1.1.1"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -73,7 +74,7 @@ def mainPage() {
                 title: "Minimum Free Memory Threshold (MB)", 
                 description: "Reboot when free memory falls below this value",
                 required: true, 
-                defaultValue: 200,
+                defaultValue: 50,
                 range: "10..500"
             
             input "enableAutoReboot", "bool",
@@ -490,32 +491,42 @@ def performReboot(isTest) {
 }
 
 def schedulePeriodicReboot() {
-    // Calculate next reboot time
-    def rebootTime = timeToday(periodicRebootTime, location.timeZone)
+    // Calculate next reboot time based on frequency and day of week
     def now = new Date()
-    def nextReboot = rebootTime
+    def rebootTime = timeToday(periodicRebootTime, location.timeZone)
     
-    // If the reboot time has already passed today, schedule for next occurrence
-    if (nextReboot <= now) {
-        use(groovy.time.TimeCategory) {
-            nextReboot = nextReboot + 1.day
-        }
-    }
-    
-    // Adjust for day of week
+    // Start with today's reboot time
     def calendar = Calendar.getInstance(location.timeZone)
-    calendar.setTime(nextReboot)
+    calendar.setTime(rebootTime)
     
     def targetDayOfWeek = getDayOfWeekNumber(periodicDayOfWeek)
     def currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
     
+    // Calculate days until target day of week
     def daysToAdd = targetDayOfWeek - currentDayOfWeek
     if (daysToAdd < 0) {
         daysToAdd += 7
     }
     
+    // If target day is today but time has passed, add days based on frequency
+    if (daysToAdd == 0 && rebootTime <= now) {
+        switch(periodicFrequency) {
+            case "weekly":
+                daysToAdd = 7
+                break
+            case "fortnightly":
+                daysToAdd = 14
+                break
+            case "monthly":
+                daysToAdd = 28
+                break
+            default:
+                daysToAdd = 7
+        }
+    }
+    
     calendar.add(Calendar.DAY_OF_MONTH, daysToAdd)
-    nextReboot = calendar.time
+    def nextReboot = calendar.time
     
     // Store next reboot time
     state.nextPeriodicReboot = nextReboot.time
@@ -523,20 +534,47 @@ def schedulePeriodicReboot() {
     // Schedule the reboot
     runOnce(nextReboot, performPeriodicReboot)
     
-    log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (${periodicFrequency})"
+    log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (${periodicFrequency}, ${periodicDayOfWeek})"
 }
 
 def performPeriodicReboot() {
     log.warn "═══════════════════════════════════════"
     log.warn "PERFORMING PERIODIC SCHEDULED REBOOT"
-    log.warn "Frequency: ${periodicFrequency}"
+    log.warn "Frequency: ${periodicFrequency}, Day: ${periodicDayOfWeek}"
     log.warn "═══════════════════════════════════════"
     
     state.lastPeriodicReboot = now()
     state.periodicRebootCount = (state.periodicRebootCount ?: 0) + 1
     
-    // Pause briefly to ensure log message is written
-    pauseExecution(2000)
+    // Schedule next periodic reboot BEFORE rebooting
+    def calendar = Calendar.getInstance(location.timeZone)
+    calendar.setTime(new Date(state.nextPeriodicReboot))
+    
+    def daysUntilNext
+    switch(periodicFrequency) {
+        case "weekly":
+            daysUntilNext = 7
+            break
+        case "fortnightly":
+            daysUntilNext = 14
+            break
+        case "monthly":
+            daysUntilNext = 28
+            break
+        default:
+            daysUntilNext = 7
+    }
+    
+    calendar.add(Calendar.DAY_OF_MONTH, daysUntilNext)
+    def nextReboot = calendar.time
+    
+    state.nextPeriodicReboot = nextReboot.time
+    runOnce(nextReboot, performPeriodicReboot)
+    
+    log.info "Next periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')}"
+    
+    // Pause briefly to ensure log messages and state are written
+    pauseExecution(3000)
     
     // Reboot the hub
     try {
@@ -558,26 +596,6 @@ def performPeriodicReboot() {
     } catch (Exception e) {
         log.error "Error sending periodic reboot command: ${e.message}"
     }
-    
-    // Schedule next periodic reboot based on frequency
-    def daysUntilNext = 7 // weekly by default
-    
-    switch(periodicFrequency) {
-        case "fortnightly":
-            daysUntilNext = 14
-            break
-        case "monthly":
-            daysUntilNext = 28 // Approximate month
-            break
-        default:
-            daysUntilNext = 7
-    }
-    
-    def nextReboot = new Date(state.nextPeriodicReboot + (daysUntilNext * 24 * 60 * 60 * 1000))
-    state.nextPeriodicReboot = nextReboot.time
-    runOnce(nextReboot, performPeriodicReboot)
-    
-    log.info "Next periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')}"
 }
 
 def getDayOfWeekNumber(dayCode) {
