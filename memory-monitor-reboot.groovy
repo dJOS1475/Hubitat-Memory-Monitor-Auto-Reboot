@@ -469,19 +469,22 @@ def performReboot(isTest) {
     // Reboot the hub using the local API
     // Requests from 127.0.0.1 bypass Hub Security authentication
     try {
-        def rebootPath = rebuildDatabase ? "/hub/rebuildDatabaseAndReboot" : "/hub/reboot"
-        
-        httpPost(
-            [
-                uri: "http://127.0.0.1:8080",
-                path: rebootPath
-            ]
-        ) { resp ->
-            if (rebuildDatabase) {
-                log.info "Database rebuild and reboot command sent successfully"
-            } else {
-                log.info "Reboot command sent successfully"
-            }
+        if (rebuildDatabase) {
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/rebuildDatabaseAndReboot"
+                ]
+            ) { resp -> }
+            log.info "Database rebuild and reboot command sent successfully"
+        } else {
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/reboot"
+                ]
+            ) { resp -> }
+            log.info "Reboot command sent successfully"
         }
     } catch (Exception e) {
         log.error "Error sending reboot command: ${e.message}"
@@ -577,19 +580,22 @@ def performPeriodicReboot() {
     
     // Reboot the hub
     try {
-        def rebootPath = rebuildDatabase ? "/hub/rebuildDatabaseAndReboot" : "/hub/reboot"
-        
-        httpPost(
-            [
-                uri: "http://127.0.0.1:8080",
-                path: rebootPath
-            ]
-        ) { resp ->
-            if (rebuildDatabase) {
-                log.info "Database rebuild and reboot command sent successfully"
-            } else {
-                log.info "Reboot command sent successfully"
-            }
+        if (rebuildDatabase) {
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/rebuildDatabaseAndReboot"
+                ]
+            ) { resp -> }
+            log.info "Database rebuild and reboot command sent successfully"
+        } else {
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/reboot"
+                ]
+            ) { resp -> }
+            log.info "Reboot command sent successfully"
         }
     } catch (Exception e) {
         log.error "Error sending periodic reboot command: ${e.message}"
