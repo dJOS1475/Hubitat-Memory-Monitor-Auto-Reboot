@@ -15,10 +15,11 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.1.2
+ *  Version: 1.1.3
  *  Author: Derek Osborn
  *  Date: 2026-01-05
  * 
+ *  v1.1.3 - Finally got the Rebuild Database on Reboot funtion working
  *  v1.1.2 - Fixed periodic reboot scheduling, reverted to /hub/rebuildDatabaseAndReboot endpoint
  *  v1.1.1 - Fixed periodic reboot scheduling to properly calculate next occurrence
  *  v1.1.0 - Simplified memory detection to use actual total RAM from hub data
@@ -52,7 +53,7 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
         section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.1.2"
+            paragraph "<b>Version:</b> 1.1.3"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -473,7 +474,11 @@ def performReboot(isTest) {
             httpPost(
                 [
                     uri: "http://127.0.0.1:8080",
-                    path: "/hub/rebuildDatabaseAndReboot"
+                    path: "/hub/reboot",
+                    headers:[
+                      "Content-Type": "application/x-www-form-urlencoded"
+                    ],
+                    body:[rebuildDatabase:"true"] 
                 ]
             ) { resp -> }
             log.info "Database rebuild and reboot command sent successfully"
