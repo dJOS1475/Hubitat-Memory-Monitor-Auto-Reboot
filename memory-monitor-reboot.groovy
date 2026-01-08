@@ -15,10 +15,11 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.1.3
+ *  Version: 1.1.4
  *  Author: Derek Osborn
  *  Date: 2026-01-05
  * 
+ *  v1.1.4 - Added uptime check - skips scheduled reboot if hub uptime < 70% of scheduled interval
  *  v1.1.3 - Finally got the Rebuild Database on Reboot funtion working
  *  v1.1.2 - Fixed periodic reboot scheduling, reverted to /hub/rebuildDatabaseAndReboot endpoint
  *  v1.1.1 - Fixed periodic reboot scheduling to properly calculate next occurrence
@@ -53,7 +54,7 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
         section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.1.3"
+            paragraph "<b>Version:</b> 1.1.4"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -546,9 +547,65 @@ def schedulePeriodicReboot() {
 
 def performPeriodicReboot() {
     log.warn "═══════════════════════════════════════"
-    log.warn "PERFORMING PERIODIC SCHEDULED REBOOT"
+    log.warn "PERIODIC REBOOT CHECK"
     log.warn "Frequency: ${periodicFrequency}, Day: ${periodicDayOfWeek}"
     log.warn "═══════════════════════════════════════"
+    
+    // Check if hub uptime is at least 70% of scheduled interval
+    def hubUptimeSeconds = location.hub.uptime
+    def requiredUptimeSeconds = 0
+    
+    switch(periodicFrequency) {
+        case "weekly":
+            requiredUptimeSeconds = (7 * 24 * 60 * 60) * 0.7  // 70% of 7 days
+            break
+        case "fortnightly":
+            requiredUptimeSeconds = (14 * 24 * 60 * 60) * 0.7  // 70% of 14 days
+            break
+        case "monthly":
+            requiredUptimeSeconds = (28 * 24 * 60 * 60) * 0.7  // 70% of 28 days
+            break
+        default:
+            requiredUptimeSeconds = (7 * 24 * 60 * 60) * 0.7
+    }
+    
+    if (hubUptimeSeconds < requiredUptimeSeconds) {
+        def uptimeDays = (hubUptimeSeconds / 86400).round(1)
+        def requiredDays = (requiredUptimeSeconds / 86400).round(1)
+        log.warn "Skipping periodic reboot - Hub uptime (${uptimeDays} days) is less than 70% of ${periodicFrequency} interval (${requiredDays} days required)"
+        log.info "Reboot will be attempted at next scheduled time"
+        
+        // Schedule next periodic reboot
+        def calendar = Calendar.getInstance(location.timeZone)
+        calendar.setTime(new Date(state.nextPeriodicReboot))
+        
+        def daysUntilNext
+        switch(periodicFrequency) {
+            case "weekly":
+                daysUntilNext = 7
+                break
+            case "fortnightly":
+                daysUntilNext = 14
+                break
+            case "monthly":
+                daysUntilNext = 28
+                break
+            default:
+                daysUntilNext = 7
+        }
+        
+        calendar.add(Calendar.DAY_OF_MONTH, daysUntilNext)
+        def nextReboot = calendar.time
+        
+        state.nextPeriodicReboot = nextReboot.time
+        runOnce(nextReboot, performPeriodicReboot)
+        
+        log.info "Next periodic reboot check scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')}"
+        return
+    }
+    
+    log.warn "PERFORMING PERIODIC SCHEDULED REBOOT"
+    log.warn "Hub uptime is sufficient (${(hubUptimeSeconds / 86400).round(1)} days)"
     
     state.lastPeriodicReboot = now()
     state.periodicRebootCount = (state.periodicRebootCount ?: 0) + 1
