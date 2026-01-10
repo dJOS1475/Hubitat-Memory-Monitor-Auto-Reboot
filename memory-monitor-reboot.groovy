@@ -19,7 +19,7 @@
  *  Author: Derek Osborn
  *  Date: 2026-01-05
  * 
- *  v1.1.5 - Updated default memory threshold to 200 MB
+ *  v1.1.5 - Updated default memory threshold to 200 MB and minor improvements to periodic memory scheduler
  *  v1.1.4 - Added uptime check during polling - reschedules reboot if uptime < 70% of interval
  *  v1.1.3 - Finally got the Rebuild Database on Reboot funtion working
  *  v1.1.2 - Fixed periodic reboot scheduling, reverted to /hub/rebuildDatabaseAndReboot endpoint
