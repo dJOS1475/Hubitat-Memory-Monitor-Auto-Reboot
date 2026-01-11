@@ -1,9 +1,9 @@
 /**
- *  Memory Monitor & Auto Reboot
+ *  Hub Health Monitor & Auto Reboot
  *
  *  Description:
- *  Monitors hub memory usage and automatically reboots when free memory falls below
- *  a configured threshold during a specified time window.
+ *  Monitors hub health (memory usage and critical events) and automatically reboots
+ *  when free memory falls below a configured threshold or critical events are detected.
  *
  *  Features:
  *  - Configurable minimum free memory threshold
@@ -11,14 +11,17 @@
  *  - Manual test reboot function
  *  - Optional database rebuild on reboot
  *  - Periodic scheduled reboots (weekly, fortnightly, monthly)
+ *  - Hub event monitoring (zigbeeOff, zwaveCrashed, severeLoad)
  *  - Hub uptime display
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.1.5
+ *  Version: 1.2.0
  *  Author: Derek Osborn
- *  Date: 2026-01-05
- * 
+ *  Date: 2026-01-12
+ *
+ *  v1.2.0 - Renamed to "Hub Health Monitor & Auto Reboot" and added hub event monitoring
+ *           for zigbeeOff, zwaveCrashed, and severeLoad events with 5-minute startup grace period
  *  v1.1.5 - Updated default memory threshold to 200 MB and minor improvements to scheduler logic
  *  v1.1.4 - Added uptime check during polling - reschedules reboot if uptime < 70% of interval
  *  v1.1.3 - Finally got the Rebuild Database on Reboot funtion working
@@ -37,10 +40,10 @@
  */
 
 definition(
-    name: "Memory Monitor & Auto Reboot",
+    name: "Hub Health Monitor & Auto Reboot",
     namespace: "dJOS",
     author: "Derek Osborn",
-    description: "Monitors hub memory usage and automatically reboots when free memory falls below threshold during configured time window",
+    description: "Monitors hub health (memory and critical events) and automatically reboots when thresholds are exceeded or critical events detected",
     category: "Utility",
     iconUrl: "",
     iconX2Url: "",
@@ -53,9 +56,13 @@ preferences {
 }
 
 def mainPage() {
-    dynamicPage(name: "mainPage", title: "Memory Monitor & Auto Reboot", install: true, uninstall: true) {
-        section("Memory Monitoring") {
-            paragraph "<b>Version:</b> 1.1.5"
+    dynamicPage(name: "mainPage", title: "Hub Health Monitor & Auto Reboot", install: true, uninstall: true) {
+        section() {
+            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+        }
+
+        section("<b>Memory Monitoring</b>") {
+            paragraph "<b>Version:</b> 1.2.0"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -72,8 +79,12 @@ def mainPage() {
                 paragraph "<br><b>Hub Uptime:</b> ${uptime}"
             }
         }
-        
-        section("Reboot Settings") {
+
+        section() {
+            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+        }
+
+        section("<b>Reboot Settings</b>") {
             input "memoryThreshold", "number", 
                 title: "Minimum Free Memory Threshold (MB)", 
                 description: "Reboot when free memory falls below this value",
@@ -92,9 +103,13 @@ def mainPage() {
                 description: "Perform database rebuild when rebooting (may take longer)",
                 defaultValue: false
         }
-        
+
         if (enableAutoReboot) {
-            section("Reboot Time Window") {
+            section() {
+                paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+            }
+
+            section("<b>Reboot Time Window</b>") {
                 paragraph "The hub will only reboot within this time window when the memory threshold is reached"
                 
                 input "rebootStartTime", "time",
@@ -108,8 +123,45 @@ def mainPage() {
                     required: true
             }
         }
-        
-        section("Periodic Reboot Schedule") {
+
+        section() {
+            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+        }
+
+        section("<b>Hub Event Monitoring</b>") {
+            paragraph "Monitor for critical hub events and automatically reboot when detected<br><i>(Critical events are ignored for the first 5 minutes after hub startup)</i>"
+
+            input "enableEventMonitoring", "bool",
+                title: "Enable Hub Event Monitoring",
+                description: "Monitor for critical hub events and reboot when detected",
+                defaultValue: false,
+                submitOnChange: true
+
+            if (enableEventMonitoring) {
+                paragraph "<div style='margin-left: 20px;'>"
+                input "monitorZigbeeOff", "bool",
+                    title: "Monitor for zigbeeOff Event",
+                    description: "Reboot when Zigbee radio goes offline",
+                    defaultValue: true
+
+                input "monitorZwaveCrashed", "bool",
+                    title: "Monitor for zwaveCrashed Event",
+                    description: "Reboot when Z-Wave radio crashes",
+                    defaultValue: true
+
+                input "monitorSevereLoad", "bool",
+                    title: "Monitor for severeLoad Event",
+                    description: "Reboot when hub experiences severe load",
+                    defaultValue: true
+                paragraph "</div>"
+            }
+        }
+
+        section() {
+            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+        }
+
+        section("<b>Periodic Reboot Schedule</b>") {
             input "enablePeriodicReboot", "bool",
                 title: "Enable Periodic Scheduled Reboot",
                 description: "Reboot hub on a regular schedule",
@@ -151,8 +203,12 @@ def mainPage() {
                 paragraph "<i>Note: Periodic reboots will use the database rebuild setting configured above.</i>"
             }
         }
-        
-        section("Monitoring Schedule") {
+
+        section() {
+            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+        }
+
+        section("<b>Monitoring Schedule</b>") {
             input "checkInterval", "enum",
                 title: "Memory Check Interval",
                 description: "How often to check memory usage",
@@ -167,31 +223,53 @@ def mainPage() {
                 defaultValue: "15",
                 required: true
         }
-        
-        section("Notifications") {
+
+        section() {
+            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+        }
+
+        section("<b>Notifications</b>") {
             input "notifyBeforeReboot", "bool",
                 title: "Log Warning Before Reboot",
                 description: "Log a warning message before initiating reboot",
                 defaultValue: true
         }
-        
-        section("Test Reboot") {
+
+        section() {
+            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+        }
+
+        section("<b>Test Reboot</b>") {
             paragraph "<b>Warning:</b> This will immediately reboot your hub!"
             input "testReboot", "button", title: "Test Reboot Now"
         }
-        
-        section("Logging") {
+
+        section() {
+            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+        }
+
+        section("<b>Logging</b>") {
             input "enableDebug", "bool",
                 title: "Enable Debug Logging",
                 defaultValue: false
         }
-        
-        section("Statistics") {
+
+        section() {
+            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+        }
+
+        section("<b>Statistics</b>") {
             if (state.lastCheck) {
                 paragraph "<b>Last Check:</b> ${new Date(state.lastCheck).format('yyyy-MM-dd HH:mm:ss')}"
             }
             if (state.lastReboot) {
                 paragraph "<b>Last Auto Reboot:</b> ${new Date(state.lastReboot).format('yyyy-MM-dd HH:mm:ss')}"
+            }
+            if (state.lastEventReboot) {
+                paragraph "<b>Last Event-Triggered Reboot:</b> ${new Date(state.lastEventReboot).format('yyyy-MM-dd HH:mm:ss')}"
+            }
+            if (state.lastEventType) {
+                paragraph "<b>Last Event Type:</b> ${state.lastEventType}"
             }
             if (state.lastPeriodicReboot) {
                 paragraph "<b>Last Periodic Reboot:</b> ${new Date(state.lastPeriodicReboot).format('yyyy-MM-dd HH:mm:ss')}"
@@ -202,6 +280,9 @@ def mainPage() {
             if (state.rebootCount) {
                 paragraph "<b>Total Auto Reboots:</b> ${state.rebootCount}"
             }
+            if (state.eventRebootCount) {
+                paragraph "<b>Total Event-Triggered Reboots:</b> ${state.eventRebootCount}"
+            }
             if (state.periodicRebootCount) {
                 paragraph "<b>Total Periodic Reboots:</b> ${state.periodicRebootCount}"
             }
@@ -210,26 +291,43 @@ def mainPage() {
 }
 
 def installed() {
-    log.info "Memory Monitor & Auto Reboot installed"
+    log.info "Hub Health Monitor & Auto Reboot installed"
     initialize()
 }
 
 def updated() {
-    log.info "Memory Monitor & Auto Reboot updated"
+    log.info "Hub Health Monitor & Auto Reboot updated"
     unsubscribe()
     unschedule()
     initialize()
 }
 
 def uninstalled() {
-    log.info "Memory Monitor & Auto Reboot uninstalled"
+    log.info "Hub Health Monitor & Auto Reboot uninstalled"
     unschedule()
 }
 
 def initialize() {
     state.rebootCount = state.rebootCount ?: 0
     state.periodicRebootCount = state.periodicRebootCount ?: 0
-    
+    state.eventRebootCount = state.eventRebootCount ?: 0
+
+    // Subscribe to hub events if monitoring is enabled
+    if (enableEventMonitoring) {
+        if (monitorZigbeeOff) {
+            subscribe(location, "zigbeeOff", hubEventHandler)
+            log.info "Subscribed to zigbeeOff events"
+        }
+        if (monitorZwaveCrashed) {
+            subscribe(location, "zwaveCrashed", hubEventHandler)
+            log.info "Subscribed to zwaveCrashed events"
+        }
+        if (monitorSevereLoad) {
+            subscribe(location, "severeLoad", hubEventHandler)
+            log.info "Subscribed to severeLoad events"
+        }
+    }
+
     // Schedule memory checks based on configured interval
     def interval = (checkInterval ?: "15").toInteger()
     
@@ -280,6 +378,66 @@ def appButtonHandler(btn) {
             log.warn "TEST REBOOT button pressed - rebooting hub NOW"
             performReboot(true)
             break
+    }
+}
+
+def hubEventHandler(evt) {
+    def eventName = evt.name
+    def eventValue = evt.value
+
+    log.warn "═══════════════════════════════════════"
+    log.warn "CRITICAL HUB EVENT DETECTED: ${eventName}"
+    log.warn "Event Value: ${eventValue}"
+    log.warn "═══════════════════════════════════════"
+
+    // Ignore all critical events if hub has been online for less than 5 minutes
+    def hubUptimeSeconds = location.hub.uptime
+    def fiveMinutesInSeconds = 5 * 60
+
+    if (hubUptimeSeconds < fiveMinutesInSeconds) {
+        def uptimeMinutes = Math.round(hubUptimeSeconds / 60)
+        log.info "Ignoring ${eventName} event - hub uptime is only ${uptimeMinutes} minute(s) (waiting 5 minutes)"
+        return
+    }
+
+    // Store event information
+    state.lastEventReboot = now()
+    state.lastEventType = eventName
+    state.eventRebootCount = (state.eventRebootCount ?: 0) + 1
+
+    // Perform reboot due to hub event
+    def dbAction = rebuildDatabase ? " with Database Rebuild" : ""
+    log.warn "Initiating hub reboot${dbAction} due to ${eventName} event"
+
+    // Pause briefly to ensure log messages are written
+    pauseExecution(2000)
+
+    // Reboot the hub
+    try {
+        if (rebuildDatabase) {
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/reboot",
+                    headers:[
+                      "Content-Type": "application/x-www-form-urlencoded"
+                    ],
+                    body:[rebuildDatabase:"true"]
+                ]
+            ) { resp -> }
+            log.info "Database rebuild and reboot command sent successfully"
+        } else {
+            httpPost(
+                [
+                    uri: "http://127.0.0.1:8080",
+                    path: "/hub/reboot"
+                ]
+            ) { resp -> }
+            log.info "Reboot command sent successfully"
+        }
+    } catch (Exception e) {
+        log.error "Error sending reboot command: ${e.message}"
+        log.error "You may need to reboot manually from Settings > Reboot"
     }
 }
 
@@ -519,7 +677,7 @@ def isWithinRebootWindow() {
 
 def performReboot(isTest) {
     def memInfo = getMemoryInfo()
-    
+
     if (notifyBeforeReboot || isTest) {
         def reason = isTest ? "TEST REBOOT" : "Low Memory (${memInfo?.free} MB free)"
         def dbAction = rebuildDatabase ? " with Database Rebuild" : ""
@@ -527,12 +685,12 @@ def performReboot(isTest) {
         log.warn "REBOOTING HUB${dbAction} - Reason: ${reason}"
         log.warn "═══════════════════════════════════════"
     }
-    
+
     if (!isTest) {
         state.lastReboot = now()
         state.rebootCount = (state.rebootCount ?: 0) + 1
     }
-    
+
     // Pause briefly to ensure log message is written
     pauseExecution(2000)
     
@@ -672,10 +830,10 @@ def performPeriodicReboot() {
     }
     
     log.warn "Hub uptime is sufficient (${(hubUptimeSeconds / 86400).round(1)} days) - proceeding with reboot"
-    
+
     state.lastPeriodicReboot = now()
     state.periodicRebootCount = (state.periodicRebootCount ?: 0) + 1
-    
+
     // Schedule next periodic reboot BEFORE rebooting
     def calendar = Calendar.getInstance(location.timeZone)
     calendar.setTime(new Date(state.nextPeriodicReboot))
