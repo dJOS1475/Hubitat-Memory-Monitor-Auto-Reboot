@@ -16,10 +16,11 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.2.0
+ *  Version: 1.2.1
  *  Author: Derek Osborn
- *  Date: 2026-01-12
+ *  Date: 2026-01-19
  *
+ *  v1.2.1 - Fixed BigDecimal.round() compatibility issue for Hubitat
  *  v1.2.0 - Renamed to "Hub Health Monitor & Auto Reboot" and added hub event monitoring
  *           for zigbeeOff, zwaveCrashed, and severeLoad events with 5-minute startup grace period
  *  v1.1.5 - Updated default memory threshold to 200 MB and minor improvements to scheduler logic
@@ -62,7 +63,7 @@ def mainPage() {
         }
 
         section("<b>Memory Monitoring</b>") {
-            paragraph "<b>Version:</b> 1.2.0"
+            paragraph "<b>Version:</b> 1.2.1"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -503,8 +504,8 @@ def checkAndUpdatePeriodicReboot() {
     
     // Only check if reboot is scheduled within next 24 hours and uptime is insufficient
     if (hoursUntilReboot <= 24 && hoursUntilReboot > 0 && hubUptimeSeconds < requiredUptimeSeconds) {
-        def uptimeDays = (hubUptimeSeconds / 86400).round(1)
-        def requiredDays = (requiredUptimeSeconds / 86400).round(1)
+        def uptimeDays = (hubUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)
+        def requiredDays = (requiredUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)
         
         log.info "Upcoming periodic reboot check: Hub uptime (${uptimeDays} days) is less than required (${requiredDays} days)"
         log.info "Next reboot will be skipped - rescheduling for next ${periodicFrequency} occurrence"
@@ -796,8 +797,8 @@ def performPeriodicReboot() {
     }
     
     if (hubUptimeSeconds < requiredUptimeSeconds) {
-        def uptimeDays = (hubUptimeSeconds / 86400).round(1)
-        def requiredDays = (requiredUptimeSeconds / 86400).round(1)
+        def uptimeDays = (hubUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)
+        def requiredDays = (requiredUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)
         log.warn "Skipping periodic reboot - Hub uptime (${uptimeDays} days) is less than 70% of ${periodicFrequency} interval (${requiredDays} days required)"
         
         // Reschedule for next occurrence
@@ -829,7 +830,7 @@ def performPeriodicReboot() {
         return
     }
     
-    log.warn "Hub uptime is sufficient (${(hubUptimeSeconds / 86400).round(1)} days) - proceeding with reboot"
+    log.warn "Hub uptime is sufficient (${(hubUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)} days) - proceeding with reboot"
 
     state.lastPeriodicReboot = now()
     state.periodicRebootCount = (state.periodicRebootCount ?: 0) + 1
