@@ -16,10 +16,12 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.2.1
+ *  Version: 1.2.2
  *  Author: Derek Osborn
  *  Date: 2026-01-19
  *
+ *  v1.2.2 - Improved debug mode for periodic reboots - uses exact reboot time on current day,
+ *           bypassing day-of-week and uptime checks. Removed hourly option.
  *  v1.2.1 - Fixed BigDecimal.round() compatibility issue for Hubitat
  *  v1.2.0 - Renamed to "Hub Health Monitor & Auto Reboot" and added hub event monitoring
  *           for zigbeeOff, zwaveCrashed, and severeLoad events with 5-minute startup grace period
@@ -170,21 +172,20 @@ def mainPage() {
                 submitOnChange: true
             
             if (enablePeriodicReboot) {
-                def frequencyOptions = [
-                    "weekly": "Weekly",
-                    "fortnightly": "Fortnightly (Every 2 weeks)",
-                    "monthly": "Monthly"
-                ]
-                if (enableDebug) {
-                    frequencyOptions = ["hourly": "Hourly (Debug Only)"] + frequencyOptions
-                }
-
                 input "periodicFrequency", "enum",
                     title: "Reboot Frequency",
                     description: "How often to perform scheduled reboot",
-                    options: frequencyOptions,
+                    options: [
+                        "weekly": "Weekly",
+                        "fortnightly": "Fortnightly (Every 2 weeks)",
+                        "monthly": "Monthly"
+                    ],
                     required: true,
                     defaultValue: "weekly"
+
+                if (enableDebug) {
+                    paragraph "<i>Debug Mode: Reboot will be scheduled for today at the specified time, regardless of day selection or hub uptime.</i>"
+                }
                 
                 input "periodicDayOfWeek", "enum",
                     title: "Day of Week",
@@ -484,8 +485,8 @@ def checkMemory() {
 }
 
 def checkAndUpdatePeriodicReboot() {
-    // Skip uptime check for hourly (debug) mode
-    if (periodicFrequency == "hourly") {
+    // Skip uptime check in debug mode
+    if (enableDebug) {
         return
     }
 
@@ -736,23 +737,30 @@ def performReboot(isTest) {
 }
 
 def schedulePeriodicReboot() {
-    // Handle hourly (debug) mode separately
-    if (periodicFrequency == "hourly") {
-        def calendar = Calendar.getInstance(location.timeZone)
-        calendar.add(Calendar.HOUR, 1)
-        def nextReboot = calendar.time
+    def now = new Date()
+    def rebootTime = timeToday(periodicRebootTime, location.timeZone)
+
+    // Handle debug mode - schedule for today at the specified time
+    if (enableDebug) {
+        def nextReboot
+        if (rebootTime <= now) {
+            // Time has already passed today, schedule for tomorrow
+            def calendar = Calendar.getInstance(location.timeZone)
+            calendar.setTime(rebootTime)
+            calendar.add(Calendar.DAY_OF_MONTH, 1)
+            nextReboot = calendar.time
+        } else {
+            nextReboot = rebootTime
+        }
 
         state.nextPeriodicReboot = nextReboot.time
         runOnce(nextReboot, performPeriodicReboot)
 
-        log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (hourly - debug mode)"
+        log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (debug mode - ignoring day/uptime checks)"
         return
     }
 
     // Calculate next reboot time based on frequency and day of week
-    def now = new Date()
-    def rebootTime = timeToday(periodicRebootTime, location.timeZone)
-
     // Start with today's reboot time
     def calendar = Calendar.getInstance(location.timeZone)
     calendar.setTime(rebootTime)
@@ -798,11 +806,11 @@ def schedulePeriodicReboot() {
 def performPeriodicReboot() {
     log.warn "═══════════════════════════════════════"
     log.warn "PERFORMING PERIODIC SCHEDULED REBOOT"
-    log.warn "Frequency: ${periodicFrequency}${periodicFrequency != 'hourly' ? ', Day: ' + periodicDayOfWeek : ' (debug mode)'}"
+    log.warn "Frequency: ${periodicFrequency}, Day: ${periodicDayOfWeek}${enableDebug ? ' (debug mode)' : ''}"
     log.warn "═══════════════════════════════════════"
 
-    // Skip uptime check for hourly (debug) mode
-    if (periodicFrequency != "hourly") {
+    // Skip uptime check in debug mode
+    if (!enableDebug) {
         // Final uptime check (should have already been checked during polling)
         def hubUptimeSeconds = location.hub.uptime
         def requiredUptimeSeconds = 0
@@ -865,8 +873,9 @@ def performPeriodicReboot() {
     def calendar = Calendar.getInstance(location.timeZone)
     calendar.setTime(new Date(state.nextPeriodicReboot))
 
-    if (periodicFrequency == "hourly") {
-        calendar.add(Calendar.HOUR, 1)
+    if (enableDebug) {
+        // In debug mode, schedule for tomorrow at the same time
+        calendar.add(Calendar.DAY_OF_MONTH, 1)
     } else {
         def daysUntilNext
         switch(periodicFrequency) {
