@@ -65,7 +65,7 @@ def mainPage() {
         }
 
         section("<b>Memory Monitoring</b>") {
-            paragraph "<b>Version:</b> 1.2.1"
+            paragraph "<b>Version:</b> 1.2.2"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
