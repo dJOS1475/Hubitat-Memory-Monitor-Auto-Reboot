@@ -16,10 +16,12 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.2.2
+ *  Version: 1.2.3
  *  Author: Derek Osborn
- *  Date: 2026-01-19
+ *  Date: 2026-01-22
  *
+ *  v1.2.3 - Added hub model detection using getHubVersion() and display in info panel.
+ *           Total RAM now determined by hub model (C-8 Pro and higher = 2GB, others = 1GB)
  *  v1.2.2 - Improved debug mode for periodic reboots - uses exact reboot time on current day,
  *           bypassing day-of-week and uptime checks. Removed hourly option.
  *  v1.2.1 - Fixed BigDecimal.round() compatibility issue for Hubitat
@@ -65,7 +67,9 @@ def mainPage() {
         }
 
         section("<b>Memory Monitoring</b>") {
-            paragraph "<b>Version:</b> 1.2.2"
+            paragraph "<b>Version:</b> 1.2.3"
+            def hubModel = getHubModel()
+            paragraph "<b>Hub Model:</b> ${hubModel ?: 'Unknown'}"
             paragraph "Current Hub Memory Status:"
             def memInfo = getMemoryInfo()
             if (memInfo) {
@@ -76,7 +80,7 @@ def mainPage() {
             } else {
                 paragraph "Unable to retrieve memory information"
             }
-            
+
             def uptime = getHubUptime()
             if (uptime) {
                 paragraph "<br><b>Hub Uptime:</b> ${uptime}"
@@ -551,6 +555,29 @@ def checkAndUpdatePeriodicReboot() {
     }
 }
 
+def getHubModel() {
+    try {
+        // getHubVersion() is a built-in Hubitat method that returns the hub model
+        // Returns strings like "C-7", "C-8", "C-8 Pro", etc.
+        return getHubVersion()
+    } catch (Exception e) {
+        log.error "Error getting hub model: ${e.message}"
+        return null
+    }
+}
+
+def getTotalMemoryForModel(String model) {
+    // C-8 Pro and higher models have 2GB RAM
+    // All other models (C-1 through C-8) have 1GB RAM
+    if (model != null) {
+        def modelUpper = model.toUpperCase()
+        if (modelUpper.contains("PRO")) {
+            return 2048 // 2GB for C-8 Pro and higher
+        }
+    }
+    return 1024 // 1GB for all other hubs (C-1 through C-8)
+}
+
 def getMemoryInfo() {
     try {
         // Get memory information from history endpoint
@@ -559,25 +586,25 @@ def getMemoryInfo() {
             path: "/hub/advanced/freeOSMemoryHistory",
             timeout: 5
         ]
-        
+
         def freeMemKB = null
         def totalMemKB = null
-        
+
         httpGet(params) { resp ->
             if (resp.success) {
                 String historyData = resp.data.text
                 def lines = historyData.split('\n')
-                
+
                 // Get the last data line (skip header)
                 // Format: Date/time,Free OS,5m CPU avg,Total Java,Free Java,Direct Java
-                def dataLines = lines.findAll { line -> 
+                def dataLines = lines.findAll { line ->
                     line.trim() && !line.startsWith('Date/time')
                 }
-                
+
                 if (dataLines.size() > 0) {
                     def lastLine = dataLines.last()
                     def values = lastLine.split(',')
-                    
+
                     if (values.size() >= 4) {
                         // Column 1 = Free OS memory (KB)
                         freeMemKB = values[1].trim().toLong()
@@ -587,23 +614,18 @@ def getMemoryInfo() {
                 }
             }
         }
-        
+
         if (freeMemKB != null && totalMemKB != null) {
             // Convert KB to MB
             def freeMemMB = Math.round(freeMemKB / 1024)
-            
-            // Determine total OS RAM based on free memory
-            // Only C-8 Pro has 2GB, all others have 1GB
-            def totalMemMB
-            if (freeMemMB > 1000) {
-                totalMemMB = 2048 // 2GB (C-8 Pro)
-            } else {
-                totalMemMB = 1024 // 1GB (all other hubs)
-            }
-            
+
+            // Determine total OS RAM based on hub model
+            def hubModel = getHubModel()
+            def totalMemMB = getTotalMemoryForModel(hubModel)
+
             def usedMemMB = totalMemMB - freeMemMB
             def percentUsed = Math.round((usedMemMB / totalMemMB) * 100)
-            
+
             return [
                 free: freeMemMB,
                 total: totalMemMB,
@@ -615,7 +637,7 @@ def getMemoryInfo() {
         log.error "Error getting memory stats: ${e.message}"
         logDebug "Memory error details: ${e}"
     }
-    
+
     return null
 }
 
