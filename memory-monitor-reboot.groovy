@@ -20,8 +20,7 @@
  *  Author: Derek Osborn
  *  Date: 2026-01-22
  *
- *  v1.2.3 - Added hub model detection using getHubVersion() and display in info panel.
- *           Total RAM now determined by hub model (C-8 Pro and higher = 2GB, others = 1GB)
+ *  v1.2.3 - Added hub model detection using getHubVersion and display in info panel. Total RAM now determined by hub model.
  *  v1.2.2 - Improved debug mode for periodic reboots - uses exact reboot time on current day,
  *           bypassing day-of-week and uptime checks. Removed hourly option.
  *  v1.2.1 - Fixed BigDecimal.round() compatibility issue for Hubitat
