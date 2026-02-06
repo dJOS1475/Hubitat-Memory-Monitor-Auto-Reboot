@@ -679,52 +679,28 @@ def getMemoryInfo() {
 
 def getHubUptime() {
     try {
-        def params = [
-            uri: "http://127.0.0.1:8080",
-            path: "/hub/advanced/freeOSMemoryHistory",
-            timeout: 5
-        ]
-        
-        def historyData = null
-        
-        httpGet(params) { resp ->
-            if (resp.success) {
-                historyData = resp.data.text
-            }
+        def uptimeSeconds = location.hub.uptime
+        if (uptimeSeconds == null || uptimeSeconds < 0) return null
+
+        def days = (uptimeSeconds / 86400) as int
+        def hours = ((uptimeSeconds % 86400) / 3600) as int
+        def minutes = ((uptimeSeconds % 3600) / 60) as int
+
+        def uptimeStr = ""
+        if (days > 0) {
+            uptimeStr += "${days} day${days != 1 ? 's' : ''}, "
         }
-        
-        if (historyData != null) {
-            // Parse CSV data - skip header line and count data lines
-            def lines = historyData.split('\n')
-            def dataLines = lines.findAll { line -> 
-                line.trim() && !line.startsWith('Date/time')
-            }
-            
-            if (dataLines.size() > 0) {
-                // Each line represents a 5-minute sample
-                def uptimeMinutes = dataLines.size() * 5
-                
-                def days = (uptimeMinutes / 1440) as int
-                def hours = ((uptimeMinutes % 1440) / 60) as int
-                def minutes = (uptimeMinutes % 60) as int
-                
-                def uptimeStr = ""
-                if (days > 0) {
-                    uptimeStr += "${days} day${days != 1 ? 's' : ''}, "
-                }
-                if (hours > 0 || days > 0) {
-                    uptimeStr += "${hours} hour${hours != 1 ? 's' : ''}, "
-                }
-                uptimeStr += "${minutes} minute${minutes != 1 ? 's' : ''}"
-                
-                return uptimeStr
-            }
+        if (hours > 0 || days > 0) {
+            uptimeStr += "${hours} hour${hours != 1 ? 's' : ''}, "
         }
+        uptimeStr += "${minutes} minute${minutes != 1 ? 's' : ''}"
+
+        return uptimeStr
     } catch (Exception e) {
-        log.error "Error getting uptime from memory history: ${e.message}"
+        log.error "Error getting hub uptime: ${e.message}"
         logDebug "Uptime error details: ${e}"
     }
-    
+
     return null
 }
 
