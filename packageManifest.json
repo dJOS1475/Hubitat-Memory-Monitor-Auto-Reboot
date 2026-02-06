@@ -2,9 +2,9 @@
 	"packageName": "Hub Health Monitor & Auto Reboot",
 	"minimumHEVersion": "2.2.1",
 	"author": "Derek Osborn",
-	"version": "1.2.3",
+	"version": "1.3.0",
 	"dateReleased": "2025-12-31",
-	"releaseNotes": "v1.2.2 - Improved debug mode for testing \nv1.2.3 - Added hub model detection using getHubVersion and display in info panel. Total RAM now determined by hub model",
+	"releaseNotes": "v1.2.2 - Improved debug mode for testing \nv1.2.3 - Added hub model detection using getHubVersion and display in info panel. Total RAM now determined by hub model \nv1.3.0 - Code quality improvements",
 	"communityLink": "https://community.hubitat.com/t/release-memory-monitor-auto-reboot-application/160272",
 	"apps" : [
 		{
