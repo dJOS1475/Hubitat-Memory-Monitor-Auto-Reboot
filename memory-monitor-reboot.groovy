@@ -16,10 +16,14 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.2.3
+ *  Version: 1.3.0
  *  Author: Derek Osborn
- *  Date: 2026-01-22
+ *  Date: 2026-02-06
  *
+ *  v1.3.0 - Code quality improvements: extracted reboot helper, eliminated duplicated
+ *           frequency/uptime logic, added event reboot cooldown, fixed state updates
+ *           on failed reboots, added unsubscribe to uninstalled(), replaced deprecated
+ *           BigDecimal.ROUND_HALF_UP, centralised version constant, added HR helper.
  *  v1.2.3 - Added hub model detection using getHubVersion and display in info panel. Total RAM now determined by hub model.
  *  v1.2.2 - Improved debug mode for periodic reboots - uses exact reboot time on current day,
  *           bypassing day-of-week and uptime checks. Removed hourly option.
@@ -28,7 +32,7 @@
  *           for zigbeeOff, zwaveCrashed, and severeLoad events with 5-minute startup grace period
  *  v1.1.5 - Updated default memory threshold to 200 MB and minor improvements to scheduler logic
  *  v1.1.4 - Added uptime check during polling - reschedules reboot if uptime < 70% of interval
- *  v1.1.3 - Finally got the Rebuild Database on Reboot funtion working
+ *  v1.1.3 - Finally got the Rebuild Database on Reboot function working
  *  v1.1.2 - Fixed periodic reboot scheduling, reverted to /hub/rebuildDatabaseAndReboot endpoint
  *  v1.1.1 - Fixed periodic reboot scheduling to properly calculate next occurrence
  *  v1.1.0 - Simplified memory detection to use actual total RAM from hub data
@@ -42,6 +46,12 @@
  *  v1.0.1 - Removed Hub Security as no longer required
  *  v1.0.0 - First public release
  */
+
+import groovy.transform.Field
+
+@Field static final String VERSION = "1.3.0"
+@Field static final int STARTUP_GRACE_SECONDS = 300  // 5 minutes
+@Field static final long EVENT_REBOOT_COOLDOWN_MS = 60000  // 1 minute cooldown between event reboots
 
 definition(
     name: "Hub Health Monitor & Auto Reboot",
@@ -59,14 +69,16 @@ preferences {
     page(name: "mainPage")
 }
 
+// ──────────────────────────────────────────────
+//  UI
+// ──────────────────────────────────────────────
+
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Hub Health Monitor & Auto Reboot", install: true, uninstall: true) {
-        section() {
-            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-        }
+        sectionHR()
 
         section("<b>Memory Monitoring</b>") {
-            paragraph "<b>Version:</b> 1.2.3"
+            paragraph "<b>Version:</b> ${VERSION}"
             def hubModel = getHubModel()
             paragraph "<b>Hub Model:</b> ${hubModel ?: 'Unknown'}"
             paragraph "Current Hub Memory Status:"
@@ -86,9 +98,7 @@ def mainPage() {
             }
         }
 
-        section() {
-            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-        }
+        sectionHR()
 
         section("<b>Reboot Settings</b>") {
             input "memoryThreshold", "number", 
@@ -111,9 +121,7 @@ def mainPage() {
         }
 
         if (enableAutoReboot) {
-            section() {
-                paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-            }
+            sectionHR()
 
             section("<b>Reboot Time Window</b>") {
                 paragraph "The hub will only reboot within this time window when the memory threshold is reached"
@@ -130,12 +138,10 @@ def mainPage() {
             }
         }
 
-        section() {
-            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-        }
+        sectionHR()
 
         section("<b>Hub Event Monitoring</b>") {
-            paragraph "Monitor for critical hub events and automatically reboot when detected<br><i>(Critical events are ignored for the first 5 minutes after hub startup)</i>"
+            paragraph "Monitor for critical hub events and automatically reboot when detected<br><i>(Critical events are ignored for the first ${STARTUP_GRACE_SECONDS / 60 as int} minutes after hub startup)</i>"
 
             input "enableEventMonitoring", "bool",
                 title: "Enable Hub Event Monitoring",
@@ -163,9 +169,7 @@ def mainPage() {
             }
         }
 
-        section() {
-            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-        }
+        sectionHR()
 
         section("<b>Periodic Reboot Schedule</b>") {
             input "enablePeriodicReboot", "bool",
@@ -181,7 +185,7 @@ def mainPage() {
                     options: [
                         "weekly": "Weekly",
                         "fortnightly": "Fortnightly (Every 2 weeks)",
-                        "monthly": "Monthly"
+                        "monthly": "Monthly (Every 4 weeks)"
                     ],
                     required: true,
                     defaultValue: "weekly"
@@ -214,9 +218,7 @@ def mainPage() {
             }
         }
 
-        section() {
-            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-        }
+        sectionHR()
 
         section("<b>Monitoring Schedule</b>") {
             input "checkInterval", "enum",
@@ -234,9 +236,7 @@ def mainPage() {
                 required: true
         }
 
-        section() {
-            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-        }
+        sectionHR()
 
         section("<b>Notifications</b>") {
             input "notifyBeforeReboot", "bool",
@@ -245,18 +245,14 @@ def mainPage() {
                 defaultValue: true
         }
 
-        section() {
-            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-        }
+        sectionHR()
 
         section("<b>Test Reboot</b>") {
             paragraph "<b>Warning:</b> This will immediately reboot your hub!"
             input "testReboot", "button", title: "Test Reboot Now"
         }
 
-        section() {
-            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-        }
+        sectionHR()
 
         section("<b>Logging</b>") {
             input "enableDebug", "bool",
@@ -264,9 +260,7 @@ def mainPage() {
                 defaultValue: false
         }
 
-        section() {
-            paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
-        }
+        sectionHR()
 
         section("<b>Statistics</b>") {
             if (state.lastCheck) {
@@ -300,6 +294,17 @@ def mainPage() {
     }
 }
 
+/** Renders a styled horizontal rule inside its own section. */
+private sectionHR() {
+    section() {
+        paragraph "<hr style='background-color:#1A77C9; height: 1px; border: 0;'>"
+    }
+}
+
+// ──────────────────────────────────────────────
+//  Lifecycle
+// ──────────────────────────────────────────────
+
 def installed() {
     log.info "Hub Health Monitor & Auto Reboot installed"
     initialize()
@@ -314,6 +319,7 @@ def updated() {
 
 def uninstalled() {
     log.info "Hub Health Monitor & Auto Reboot uninstalled"
+    unsubscribe()
     unschedule()
 }
 
@@ -382,6 +388,74 @@ def initialize() {
     runIn(5, checkMemory)
 }
 
+// ──────────────────────────────────────────────
+//  Shared helpers
+// ──────────────────────────────────────────────
+
+/**
+ * Returns the number of days for a given periodic frequency string.
+ * Defaults to 7 (weekly) if the value is null or unrecognised.
+ */
+private int getFrequencyDays(String freq = null) {
+    switch(freq ?: periodicFrequency ?: "weekly") {
+        case "weekly":      return 7
+        case "fortnightly": return 14
+        case "monthly":     return 28
+        default:            return 7
+    }
+}
+
+/**
+ * Returns the required uptime in seconds (70 % of the frequency interval).
+ */
+private long getRequiredUptimeSeconds(String freq = null) {
+    return (long)((getFrequencyDays(freq) * 24L * 60L * 60L) * 0.7)
+}
+
+/**
+ * Formats a seconds value as a day count with one decimal place,
+ * avoiding the deprecated BigDecimal.ROUND_HALF_UP constant.
+ */
+private String formatDays(Number seconds) {
+    return String.valueOf(Math.round(seconds / 8640.0) / 10.0)
+}
+
+/**
+ * Sends the reboot (or rebuild-and-reboot) HTTP command to the hub.
+ * Returns true if the command was sent successfully, false otherwise.
+ */
+private boolean executeReboot() {
+    try {
+        def params = [
+            uri: "http://127.0.0.1:8080",
+            path: "/hub/reboot"
+        ]
+        if (rebuildDatabase) {
+            params.headers = ["Content-Type": "application/x-www-form-urlencoded"]
+            params.body = [rebuildDatabase: "true"]
+        }
+        httpPost(params) { resp -> }
+        log.info "Reboot command sent successfully${rebuildDatabase ? ' (with DB rebuild)' : ''}"
+        return true
+    } catch (Exception e) {
+        log.error "Error sending reboot command: ${e.message}"
+        return false
+    }
+}
+
+/**
+ * Advances a Calendar by the appropriate number of days for the
+ * current periodic frequency and returns the resulting Date.
+ */
+private Date advanceByFrequency(Calendar calendar, String freq = null) {
+    calendar.add(Calendar.DAY_OF_MONTH, getFrequencyDays(freq))
+    return calendar.time
+}
+
+// ──────────────────────────────────────────────
+//  Button handler
+// ──────────────────────────────────────────────
+
 def appButtonHandler(btn) {
     switch(btn) {
         case "testReboot":
@@ -390,6 +464,10 @@ def appButtonHandler(btn) {
             break
     }
 }
+
+// ──────────────────────────────────────────────
+//  Hub event monitoring
+// ──────────────────────────────────────────────
 
 def hubEventHandler(evt) {
     def eventName = evt.name
@@ -400,20 +478,21 @@ def hubEventHandler(evt) {
     log.warn "Event Value: ${eventValue}"
     log.warn "═══════════════════════════════════════"
 
-    // Ignore all critical events if hub has been online for less than 5 minutes
+    // Ignore all critical events if hub has been online for less than the grace period
     def hubUptimeSeconds = location.hub.uptime
-    def fiveMinutesInSeconds = 5 * 60
-
-    if (hubUptimeSeconds < fiveMinutesInSeconds) {
+    if (hubUptimeSeconds < STARTUP_GRACE_SECONDS) {
         def uptimeMinutes = Math.round(hubUptimeSeconds / 60)
-        log.info "Ignoring ${eventName} event - hub uptime is only ${uptimeMinutes} minute(s) (waiting 5 minutes)"
+        log.info "Ignoring ${eventName} event - hub uptime is only ${uptimeMinutes} minute(s) (waiting ${STARTUP_GRACE_SECONDS / 60 as int} minutes)"
         return
     }
 
-    // Store event information
-    state.lastEventReboot = now()
-    state.lastEventType = eventName
-    state.eventRebootCount = (state.eventRebootCount ?: 0) + 1
+    // Cooldown: prevent duplicate reboots if multiple events fire in quick succession
+    def lastAttempt = state.lastRebootAttempt ?: 0
+    if ((now() - lastAttempt) < EVENT_REBOOT_COOLDOWN_MS) {
+        log.warn "Reboot already in progress or recently attempted, ignoring duplicate ${eventName} event"
+        return
+    }
+    state.lastRebootAttempt = now()
 
     // Perform reboot due to hub event
     def dbAction = rebuildDatabase ? " with Database Rebuild" : ""
@@ -422,34 +501,19 @@ def hubEventHandler(evt) {
     // Pause briefly to ensure log messages are written
     pauseExecution(2000)
 
-    // Reboot the hub
-    try {
-        if (rebuildDatabase) {
-            httpPost(
-                [
-                    uri: "http://127.0.0.1:8080",
-                    path: "/hub/reboot",
-                    headers:[
-                      "Content-Type": "application/x-www-form-urlencoded"
-                    ],
-                    body:[rebuildDatabase:"true"]
-                ]
-            ) { resp -> }
-            log.info "Database rebuild and reboot command sent successfully"
-        } else {
-            httpPost(
-                [
-                    uri: "http://127.0.0.1:8080",
-                    path: "/hub/reboot"
-                ]
-            ) { resp -> }
-            log.info "Reboot command sent successfully"
-        }
-    } catch (Exception e) {
-        log.error "Error sending reboot command: ${e.message}"
+    if (executeReboot()) {
+        // Only record the reboot in state if the command was actually sent
+        state.lastEventReboot = now()
+        state.lastEventType = eventName
+        state.eventRebootCount = (state.eventRebootCount ?: 0) + 1
+    } else {
         log.error "You may need to reboot manually from Settings > Reboot"
     }
 }
+
+// ──────────────────────────────────────────────
+//  Memory monitoring
+// ──────────────────────────────────────────────
 
 def checkMemory() {
     state.lastCheck = now()
@@ -495,56 +559,25 @@ def checkAndUpdatePeriodicReboot() {
 
     // Check if hub uptime is at least 70% of scheduled interval
     def hubUptimeSeconds = location.hub.uptime
-    def requiredUptimeSeconds = 0
-
-    switch(periodicFrequency) {
-        case "weekly":
-            requiredUptimeSeconds = (7 * 24 * 60 * 60) * 0.7  // 70% of 7 days
-            break
-        case "fortnightly":
-            requiredUptimeSeconds = (14 * 24 * 60 * 60) * 0.7  // 70% of 14 days
-            break
-        case "monthly":
-            requiredUptimeSeconds = (28 * 24 * 60 * 60) * 0.7  // 70% of 28 days
-            break
-        default:
-            requiredUptimeSeconds = (7 * 24 * 60 * 60) * 0.7
-    }
+    def requiredSeconds = getRequiredUptimeSeconds()
 
     // Check if next scheduled reboot is coming up soon (within 24 hours)
-    def now = new Date().time
+    def nowMs = new Date().time
     def nextReboot = state.nextPeriodicReboot
-    def hoursUntilReboot = (nextReboot - now) / (1000 * 60 * 60)
+    def hoursUntilReboot = (nextReboot - nowMs) / (1000 * 60 * 60)
 
     // Only check if reboot is scheduled within next 24 hours and uptime is insufficient
-    if (hoursUntilReboot <= 24 && hoursUntilReboot > 0 && hubUptimeSeconds < requiredUptimeSeconds) {
-        def uptimeDays = (hubUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)
-        def requiredDays = (requiredUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)
+    if (hoursUntilReboot <= 24 && hoursUntilReboot > 0 && hubUptimeSeconds < requiredSeconds) {
+        def uptimeDays = formatDays(hubUptimeSeconds)
+        def requiredDays = formatDays(requiredSeconds)
 
         log.info "Upcoming periodic reboot check: Hub uptime (${uptimeDays} days) is less than required (${requiredDays} days)"
-        log.info "Next reboot will be skipped - rescheduling for next ${periodicFrequency} occurrence"
+        log.info "Next reboot will be skipped - rescheduling for next ${periodicFrequency ?: 'weekly'} occurrence"
 
         // Reschedule to next occurrence
         def calendar = Calendar.getInstance(location.timeZone)
         calendar.setTime(new Date(nextReboot))
-
-        def daysUntilNext
-        switch(periodicFrequency) {
-            case "weekly":
-                daysUntilNext = 7
-                break
-            case "fortnightly":
-                daysUntilNext = 14
-                break
-            case "monthly":
-                daysUntilNext = 28
-                break
-            default:
-                daysUntilNext = 7
-        }
-
-        calendar.add(Calendar.DAY_OF_MONTH, daysUntilNext)
-        def newNextReboot = calendar.time
+        def newNextReboot = advanceByFrequency(calendar)
 
         state.nextPeriodicReboot = newNextReboot.time
         unschedule(performPeriodicReboot)
@@ -553,6 +586,10 @@ def checkAndUpdatePeriodicReboot() {
         log.info "Periodic reboot rescheduled to ${newNextReboot.format('yyyy-MM-dd HH:mm:ss')}"
     }
 }
+
+// ──────────────────────────────────────────────
+//  Hub info helpers
+// ──────────────────────────────────────────────
 
 def getHubModel() {
     try {
@@ -642,54 +679,34 @@ def getMemoryInfo() {
 
 def getHubUptime() {
     try {
-        def params = [
-            uri: "http://127.0.0.1:8080",
-            path: "/hub/advanced/freeOSMemoryHistory",
-            timeout: 5
-        ]
-        
-        def historyData = null
-        
-        httpGet(params) { resp ->
-            if (resp.success) {
-                historyData = resp.data.text
-            }
+        def uptimeSeconds = location.hub.uptime
+        if (uptimeSeconds == null || uptimeSeconds < 0) return null
+
+        def days = (uptimeSeconds / 86400) as int
+        def hours = ((uptimeSeconds % 86400) / 3600) as int
+        def minutes = ((uptimeSeconds % 3600) / 60) as int
+
+        def uptimeStr = ""
+        if (days > 0) {
+            uptimeStr += "${days} day${days != 1 ? 's' : ''}, "
         }
-        
-        if (historyData != null) {
-            // Parse CSV data - skip header line and count data lines
-            def lines = historyData.split('\n')
-            def dataLines = lines.findAll { line -> 
-                line.trim() && !line.startsWith('Date/time')
-            }
-            
-            if (dataLines.size() > 0) {
-                // Each line represents a 5-minute sample
-                def uptimeMinutes = dataLines.size() * 5
-                
-                def days = (uptimeMinutes / 1440) as int
-                def hours = ((uptimeMinutes % 1440) / 60) as int
-                def minutes = (uptimeMinutes % 60) as int
-                
-                def uptimeStr = ""
-                if (days > 0) {
-                    uptimeStr += "${days} day${days != 1 ? 's' : ''}, "
-                }
-                if (hours > 0 || days > 0) {
-                    uptimeStr += "${hours} hour${hours != 1 ? 's' : ''}, "
-                }
-                uptimeStr += "${minutes} minute${minutes != 1 ? 's' : ''}"
-                
-                return uptimeStr
-            }
+        if (hours > 0 || days > 0) {
+            uptimeStr += "${hours} hour${hours != 1 ? 's' : ''}, "
         }
+        uptimeStr += "${minutes} minute${minutes != 1 ? 's' : ''}"
+
+        return uptimeStr
     } catch (Exception e) {
-        log.error "Error getting uptime from memory history: ${e.message}"
+        log.error "Error getting hub uptime: ${e.message}"
         logDebug "Uptime error details: ${e}"
     }
-    
+
     return null
 }
+
+// ──────────────────────────────────────────────
+//  Reboot window & execution
+// ──────────────────────────────────────────────
 
 def isWithinRebootWindow() {
     if (!rebootStartTime || !rebootEndTime) {
@@ -727,35 +744,14 @@ def performReboot(isTest) {
     // Pause briefly to ensure log message is written
     pauseExecution(2000)
     
-    // Reboot the hub using the local API
-    // Requests from 127.0.0.1 bypass Hub Security authentication
-    try {
-        if (rebuildDatabase) {
-            httpPost(
-                [
-                    uri: "http://127.0.0.1:8080",
-                    path: "/hub/reboot",
-                    headers:[
-                      "Content-Type": "application/x-www-form-urlencoded"
-                    ],
-                    body:[rebuildDatabase:"true"] 
-                ]
-            ) { resp -> }
-            log.info "Database rebuild and reboot command sent successfully"
-        } else {
-            httpPost(
-                [
-                    uri: "http://127.0.0.1:8080",
-                    path: "/hub/reboot"
-                ]
-            ) { resp -> }
-            log.info "Reboot command sent successfully"
-        }
-    } catch (Exception e) {
-        log.error "Error sending reboot command: ${e.message}"
+    if (!executeReboot()) {
         log.error "You may need to reboot manually from Settings > Reboot"
     }
 }
+
+// ──────────────────────────────────────────────
+//  Periodic reboot scheduling
+// ──────────────────────────────────────────────
 
 def schedulePeriodicReboot() {
     def now = new Date()
@@ -797,19 +793,7 @@ def schedulePeriodicReboot() {
 
     // If target day is today but time has passed, add days based on frequency
     if (daysToAdd == 0 && rebootTime <= now) {
-        switch(periodicFrequency) {
-            case "weekly":
-                daysToAdd = 7
-                break
-            case "fortnightly":
-                daysToAdd = 14
-                break
-            case "monthly":
-                daysToAdd = 28
-                break
-            default:
-                daysToAdd = 7
-        }
+        daysToAdd = getFrequencyDays()
     }
 
     calendar.add(Calendar.DAY_OF_MONTH, daysToAdd)
@@ -821,61 +805,30 @@ def schedulePeriodicReboot() {
     // Schedule the reboot
     runOnce(nextReboot, performPeriodicReboot)
 
-    log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (${periodicFrequency}, ${periodicDayOfWeek})"
+    log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (${periodicFrequency ?: 'weekly'}, ${periodicDayOfWeek})"
 }
 
 def performPeriodicReboot() {
     log.warn "═══════════════════════════════════════"
     log.warn "PERFORMING PERIODIC SCHEDULED REBOOT"
-    log.warn "Frequency: ${periodicFrequency}, Day: ${periodicDayOfWeek}${enableDebug ? ' (debug mode)' : ''}"
+    log.warn "Frequency: ${periodicFrequency ?: 'weekly'}, Day: ${periodicDayOfWeek}${enableDebug ? ' (debug mode)' : ''}"
     log.warn "═══════════════════════════════════════"
 
     // Skip uptime check in debug mode
     if (!enableDebug) {
         // Final uptime check (should have already been checked during polling)
         def hubUptimeSeconds = location.hub.uptime
-        def requiredUptimeSeconds = 0
+        def requiredSeconds = getRequiredUptimeSeconds()
 
-        switch(periodicFrequency) {
-            case "weekly":
-                requiredUptimeSeconds = (7 * 24 * 60 * 60) * 0.7
-                break
-            case "fortnightly":
-                requiredUptimeSeconds = (14 * 24 * 60 * 60) * 0.7
-                break
-            case "monthly":
-                requiredUptimeSeconds = (28 * 24 * 60 * 60) * 0.7
-                break
-            default:
-                requiredUptimeSeconds = (7 * 24 * 60 * 60) * 0.7
-        }
-
-        if (hubUptimeSeconds < requiredUptimeSeconds) {
-            def uptimeDays = (hubUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)
-            def requiredDays = (requiredUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)
-            log.warn "Skipping periodic reboot - Hub uptime (${uptimeDays} days) is less than 70% of ${periodicFrequency} interval (${requiredDays} days required)"
+        if (hubUptimeSeconds < requiredSeconds) {
+            def uptimeDays = formatDays(hubUptimeSeconds)
+            def requiredDays = formatDays(requiredSeconds)
+            log.warn "Skipping periodic reboot - Hub uptime (${uptimeDays} days) is less than 70% of ${periodicFrequency ?: 'weekly'} interval (${requiredDays} days required)"
 
             // Reschedule for next occurrence
             def calendar = Calendar.getInstance(location.timeZone)
             calendar.setTime(new Date(state.nextPeriodicReboot))
-
-            def daysUntilNext
-            switch(periodicFrequency) {
-                case "weekly":
-                    daysUntilNext = 7
-                    break
-                case "fortnightly":
-                    daysUntilNext = 14
-                    break
-                case "monthly":
-                    daysUntilNext = 28
-                    break
-                default:
-                    daysUntilNext = 7
-            }
-
-            calendar.add(Calendar.DAY_OF_MONTH, daysUntilNext)
-            def nextReboot = calendar.time
+            def nextReboot = advanceByFrequency(calendar)
 
             state.nextPeriodicReboot = nextReboot.time
             runOnce(nextReboot, performPeriodicReboot)
@@ -884,7 +837,7 @@ def performPeriodicReboot() {
             return
         }
 
-        log.warn "Hub uptime is sufficient (${(hubUptimeSeconds / 86400).setScale(1, BigDecimal.ROUND_HALF_UP)} days) - proceeding with reboot"
+        log.warn "Hub uptime is sufficient (${formatDays(hubUptimeSeconds)} days) - proceeding with reboot"
     }
 
     state.lastPeriodicReboot = now()
@@ -898,21 +851,7 @@ def performPeriodicReboot() {
         // In debug mode, schedule for tomorrow at the same time
         calendar.add(Calendar.DAY_OF_MONTH, 1)
     } else {
-        def daysUntilNext
-        switch(periodicFrequency) {
-            case "weekly":
-                daysUntilNext = 7
-                break
-            case "fortnightly":
-                daysUntilNext = 14
-                break
-            case "monthly":
-                daysUntilNext = 28
-                break
-            default:
-                daysUntilNext = 7
-        }
-        calendar.add(Calendar.DAY_OF_MONTH, daysUntilNext)
+        advanceByFrequency(calendar)
     }
 
     def nextReboot = calendar.time
@@ -925,33 +864,14 @@ def performPeriodicReboot() {
     // Pause briefly to ensure log messages and state are written
     pauseExecution(3000)
     
-    // Reboot the hub
-    try {
-        if (rebuildDatabase) {
-            httpPost(
-                [
-                    uri: "http://127.0.0.1:8080",
-                    path: "/hub/reboot",
-                    headers:[
-                      "Content-Type": "application/x-www-form-urlencoded"
-                    ],
-                    body:[rebuildDatabase:"true"]
-                ]
-            ) { resp -> }
-            log.info "Database rebuild and reboot command sent successfully"
-        } else {
-            httpPost(
-                [
-                    uri: "http://127.0.0.1:8080",
-                    path: "/hub/reboot"
-                ]
-            ) { resp -> }
-            log.info "Reboot command sent successfully"
-        }
-    } catch (Exception e) {
-        log.error "Error sending periodic reboot command: ${e.message}"
+    if (!executeReboot()) {
+        log.error "Periodic reboot command failed - you may need to reboot manually"
     }
 }
+
+// ──────────────────────────────────────────────
+//  Utility
+// ──────────────────────────────────────────────
 
 def getDayOfWeekNumber(dayCode) {
     switch(dayCode) {
