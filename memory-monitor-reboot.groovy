@@ -16,10 +16,16 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.3.0
+ *  Version: 1.4.0
  *  Author: Derek Osborn
- *  Date: 2026-02-06
+ *  Date: 2026-05-04
  *
+ *  v1.4.0 - Added Daily option to periodic reboot frequency. Day-of-week
+ *           selector is dynamically hidden when Daily is selected (it has
+ *           no meaning for a daily schedule). Surfaced the previously hidden
+ *           70%-of-interval uptime gate as a configurable checkbox (defaults
+ *           ON for all frequencies, with explanatory help text), so users
+ *           can opt out if they want a guaranteed firing.
  *  v1.3.0 - Code quality improvements: extracted reboot helper, eliminated duplicated
  *           frequency/uptime logic, added event reboot cooldown, fixed state updates
  *           on failed reboots, added unsubscribe to uninstalled(), replaced deprecated
@@ -49,7 +55,7 @@
 
 import groovy.transform.Field
 
-@Field static final String VERSION = "1.3.0"
+@Field static final String VERSION = "1.4.0"
 @Field static final int STARTUP_GRACE_SECONDS = 300  // 5 minutes
 @Field static final long EVENT_REBOOT_COOLDOWN_MS = 60000  // 1 minute cooldown between event reboots
 
@@ -183,37 +189,51 @@ def mainPage() {
                     title: "Reboot Frequency",
                     description: "How often to perform scheduled reboot",
                     options: [
-                        "weekly": "Weekly",
+                        "daily":       "Daily",
+                        "weekly":      "Weekly",
                         "fortnightly": "Fortnightly (Every 2 weeks)",
-                        "monthly": "Monthly (Every 4 weeks)"
+                        "monthly":     "Monthly (Every 4 weeks)"
                     ],
                     required: true,
-                    defaultValue: "weekly"
+                    defaultValue: "weekly",
+                    submitOnChange: true
 
                 if (enableDebug) {
                     paragraph "<i>Debug Mode: Reboot will be scheduled for today at the specified time, regardless of day selection or hub uptime.</i>"
                 }
-                
-                input "periodicDayOfWeek", "enum",
-                    title: "Day of Week",
-                    description: "Which day to perform the reboot",
-                    options: [
-                        "SUN": "Sunday",
-                        "MON": "Monday",
-                        "TUE": "Tuesday",
-                        "WED": "Wednesday",
-                        "THU": "Thursday",
-                        "FRI": "Friday",
-                        "SAT": "Saturday"
-                    ],
-                    required: true,
-                    defaultValue: "SUN"
-                
+
+                if (periodicFrequency != "daily") {
+                    input "periodicDayOfWeek", "enum",
+                        title: "Day of Week",
+                        description: "Which day to perform the reboot",
+                        options: [
+                            "SUN": "Sunday",
+                            "MON": "Monday",
+                            "TUE": "Tuesday",
+                            "WED": "Wednesday",
+                            "THU": "Thursday",
+                            "FRI": "Friday",
+                            "SAT": "Saturday"
+                        ],
+                        required: true,
+                        defaultValue: "SUN"
+                }
+
                 input "periodicRebootTime", "time",
                     title: "Reboot Time",
                     description: "Time to perform the scheduled reboot",
                     required: true
-                
+
+                input "skipIfRecentlyRebooted", "bool",
+                    title: "Skip scheduled reboot if hub rebooted recently",
+                    defaultValue: true
+                paragraph "<i>When enabled, a scheduled reboot is skipped if hub uptime is " +
+                    "less than 70% of the interval (~17 hours for daily, 4.9 days for weekly, " +
+                    "9.8 days for fortnightly, 19.6 days for monthly). Prevents a redundant " +
+                    "reboot soon after a memory-threshold trigger, manual reboot, or power " +
+                    "event. Uncheck if you want every scheduled reboot to fire regardless " +
+                    "of recent uptime.</i>"
+
                 paragraph "<i>Note: Periodic reboots will use the database rebuild setting configured above.</i>"
             }
         }
@@ -380,7 +400,8 @@ def initialize() {
     }
     
     // Schedule periodic reboots
-    if (enablePeriodicReboot && periodicDayOfWeek && periodicRebootTime) {
+    if (enablePeriodicReboot && periodicRebootTime &&
+        (periodicFrequency == "daily" || periodicDayOfWeek)) {
         schedulePeriodicReboot()
     }
     
@@ -398,11 +419,21 @@ def initialize() {
  */
 private int getFrequencyDays(String freq = null) {
     switch(freq ?: periodicFrequency ?: "weekly") {
+        case "daily":       return 1
         case "weekly":      return 7
         case "fortnightly": return 14
         case "monthly":     return 28
         default:            return 7
     }
+}
+
+/**
+ * Single source of truth for whether a recent-reboot should suppress the next
+ * scheduled one. Defaults ON when the setting is null so existing v1.3.0
+ * installs upgrade with no behaviour change.
+ */
+private boolean shouldSkipIfRecent() {
+    return settings.skipIfRecentlyRebooted != false
 }
 
 /**
@@ -554,6 +585,11 @@ def checkMemory() {
 def checkAndUpdatePeriodicReboot() {
     // Skip uptime check in debug mode
     if (enableDebug) {
+        return
+    }
+
+    // Honour the user's "skip if hub rebooted recently" choice.
+    if (!shouldSkipIfRecent()) {
         return
     }
 
@@ -777,23 +813,27 @@ def schedulePeriodicReboot() {
         return
     }
 
-    // Calculate next reboot time based on frequency and day of week
-    // Start with today's reboot time
+    // Calculate next reboot time based on frequency and (for non-daily) day of week
     def calendar = Calendar.getInstance(location.timeZone)
     calendar.setTime(rebootTime)
 
-    def targetDayOfWeek = getDayOfWeekNumber(periodicDayOfWeek)
-    def currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
+    def daysToAdd
+    if (periodicFrequency == "daily") {
+        // Daily ignores day-of-week: today if the time hasn't passed, else tomorrow.
+        daysToAdd = (rebootTime <= now) ? 1 : 0
+    } else {
+        def targetDayOfWeek = getDayOfWeekNumber(periodicDayOfWeek)
+        def currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
 
-    // Calculate days until target day of week
-    def daysToAdd = targetDayOfWeek - currentDayOfWeek
-    if (daysToAdd < 0) {
-        daysToAdd += 7
-    }
+        daysToAdd = targetDayOfWeek - currentDayOfWeek
+        if (daysToAdd < 0) {
+            daysToAdd += 7
+        }
 
-    // If target day is today but time has passed, add days based on frequency
-    if (daysToAdd == 0 && rebootTime <= now) {
-        daysToAdd = getFrequencyDays()
+        // If target day is today but time has passed, add days based on frequency
+        if (daysToAdd == 0 && rebootTime <= now) {
+            daysToAdd = getFrequencyDays()
+        }
     }
 
     calendar.add(Calendar.DAY_OF_MONTH, daysToAdd)
@@ -805,17 +845,22 @@ def schedulePeriodicReboot() {
     // Schedule the reboot
     runOnce(nextReboot, performPeriodicReboot)
 
-    log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (${periodicFrequency ?: 'weekly'}, ${periodicDayOfWeek})"
+    def freqLabel = periodicFrequency ?: 'weekly'
+    def dayLabel = (freqLabel == 'daily') ? 'every day' : periodicDayOfWeek
+    log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (${freqLabel}, ${dayLabel})"
 }
 
 def performPeriodicReboot() {
+    def freqLabel = periodicFrequency ?: 'weekly'
+    def dayLabel = (freqLabel == 'daily') ? 'every day' : periodicDayOfWeek
     log.warn "═══════════════════════════════════════"
     log.warn "PERFORMING PERIODIC SCHEDULED REBOOT"
-    log.warn "Frequency: ${periodicFrequency ?: 'weekly'}, Day: ${periodicDayOfWeek}${enableDebug ? ' (debug mode)' : ''}"
+    log.warn "Frequency: ${freqLabel}, Day: ${dayLabel}${enableDebug ? ' (debug mode)' : ''}"
     log.warn "═══════════════════════════════════════"
 
-    // Skip uptime check in debug mode
-    if (!enableDebug) {
+    // Skip uptime check in debug mode, or when the user has disabled the
+    // "skip if hub rebooted recently" gate (typical for daily schedules).
+    if (!enableDebug && shouldSkipIfRecent()) {
         // Final uptime check (should have already been checked during polling)
         def hubUptimeSeconds = location.hub.uptime
         def requiredSeconds = getRequiredUptimeSeconds()

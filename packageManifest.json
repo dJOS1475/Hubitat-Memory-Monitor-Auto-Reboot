@@ -2,9 +2,9 @@
 	"packageName": "Hub Health Monitor & Auto Reboot",
 	"minimumHEVersion": "2.2.1",
 	"author": "Derek Osborn",
-	"version": "1.3.0",
-	"dateReleased": "2025-12-31",
-	"releaseNotes": "v1.2.3 - Added hub model detection using getHubVersion and display in info panel. Total RAM now determined by hub model \nv1.3.0 - Code quality improvements",
+	"version": "1.4.0",
+	"dateReleased": "2026-05-04",
+	"releaseNotes": "v1.4.0 - Added Daily option to periodic reboot frequency. Day-of-week selector is dynamically hidden when Daily is selected. Surfaced the previously hidden 70%-of-interval uptime gate as a configurable checkbox (defaults ON for all frequencies, with explanatory help text), so users can opt out when they want every scheduled reboot to fire regardless of recent uptime.",
 	"communityLink": "https://community.hubitat.com/t/release-memory-monitor-auto-reboot-application/160272",
 	"apps" : [
 		{
