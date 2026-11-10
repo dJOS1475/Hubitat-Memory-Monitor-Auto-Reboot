@@ -15,11 +15,22 @@
  *  - Hub uptime display
  *  - Detailed logging
  *  - Memory status tracking
+ *  - Push notifications on reboot (separate Notifications page)
  *
- *  Version: 1.3.1
+ *  Version: 1.4.0
  *  Author: Derek Osborn
  *  Date: 2026-11-10
  *
+ *  v1.4.0 - Added a Notifications page: send reboot alerts to notification devices (e.g. the
+ *           Hubitat mobile app), with a message template, per-reboot-type toggles,
+ *           failed-reboot alerts and a Send Test Notification button.
+ *  v1.3.3 - Low-memory reboots now wait 5 minutes after startup and use the same 1-minute
+ *           cooldown as event reboots (prevents reboot loops). Low-memory reboot stats are
+ *           only recorded when the reboot command succeeds. Free memory is read from the
+ *           live /hub/advanced/freeOSMemory endpoint instead of the 5-minute history.
+ *           Old-schedule cleanup now runs even when the memory reading fails.
+ *  v1.3.2 - Fixed "Rebuild Database on Reboot" failing with HTTP 500 on firmware 2.5.0+,
+ *           which now expects a JSON body for /hub/reboot.
  *  v1.3.1 - Rewrote periodic reboot scheduler. It now uses a weekly cron schedule on the
  *           chosen day/time (survives reboots, can't break the chain or go stale) and decides
  *           at each firing whether enough uptime has accrued for the chosen frequency.
@@ -56,9 +67,10 @@
 
 import groovy.transform.Field
 
-@Field static final String VERSION = "1.3.1"
+@Field static final String VERSION = "1.4.0"
 @Field static final int STARTUP_GRACE_SECONDS = 300  // 5 minutes
 @Field static final long EVENT_REBOOT_COOLDOWN_MS = 60000  // 1 minute cooldown between event reboots
+@Field static final String DEFAULT_NOTIFY_MESSAGE = "%hub% is rebooting - %reason%"
 
 definition(
     name: "Hub Health Monitor & Auto Reboot",
@@ -74,6 +86,7 @@ definition(
 
 preferences {
     page(name: "mainPage")
+    page(name: "notificationPage")
 }
 
 // ──────────────────────────────────────────────
@@ -245,10 +258,8 @@ def mainPage() {
         sectionHR()
 
         section("<b>Notifications</b>") {
-            input "notifyBeforeReboot", "bool",
-                title: "Log Warning Before Reboot",
-                description: "Log a warning message before initiating reboot",
-                defaultValue: true
+            def notifyDesc = notifyDevices ? "Sending to: ${notifyDevices.join(', ')}" : "Not configured - tap to set up"
+            href "notificationPage", title: "Notification Settings", description: notifyDesc
         }
 
         sectionHR()
@@ -261,6 +272,11 @@ def mainPage() {
         sectionHR()
 
         section("<b>Logging</b>") {
+            input "notifyBeforeReboot", "bool",
+                title: "Log Warning Before Reboot",
+                description: "Log a warning message before initiating reboot",
+                defaultValue: true
+
             input "enableDebug", "bool",
                 title: "Enable Debug Logging",
                 defaultValue: false
@@ -301,6 +317,39 @@ def mainPage() {
             if (state.periodicRebootCount) {
                 paragraph "<b>Total Periodic Reboots:</b> ${state.periodicRebootCount}"
             }
+        }
+    }
+}
+
+def notificationPage() {
+    dynamicPage(name: "notificationPage", title: "Notifications") {
+        section("<b>Message to Send</b>") {
+            input "notifyMessage", "textarea",
+                title: "Message",
+                defaultValue: DEFAULT_NOTIFY_MESSAGE,
+                required: false
+            paragraph "Use %hub% to include the hub name, %reason% for why the hub is rebooting, " +
+                      "%free% for current free memory (MB), %uptime% for hub uptime, and %now% for the current time."
+        }
+
+        section("<b>Use these notification devices</b>") {
+            input "notifyDevices", "capability.notification",
+                title: "On these notification devices",
+                multiple: true,
+                required: false
+        }
+
+        section("<b>Notify on</b>") {
+            input "notifyOnMemory", "bool", title: "Low-memory reboots", defaultValue: true
+            input "notifyOnEvent", "bool", title: "Hub event reboots (zigbeeOff, zwaveCrashed, severeLoad)", defaultValue: true
+            input "notifyOnPeriodic", "bool", title: "Periodic scheduled reboots", defaultValue: true
+            input "notifyOnTest", "bool", title: "Test reboots", defaultValue: true
+            input "notifyOnFailure", "bool", title: "Failed reboot attempts", defaultValue: true
+        }
+
+        section("<b>Test</b>") {
+            paragraph "Sends the message above to the selected devices without rebooting. Press Done on the main page first if you just picked devices."
+            input "testNotification", "button", title: "Send Test Notification"
         }
     }
 }
@@ -445,6 +494,63 @@ private String formatDays(Number seconds) {
 }
 
 /**
+ * Sends a reboot notification to the selected devices if notifications are enabled
+ * for this kind of reboot. type: memory, event, periodic, test or failure.
+ * Toggles that were never saved count as on.
+ */
+private void sendRebootNotification(String type, String reason) {
+    if (!notifyDevices) return
+    def toggle = [memory: "notifyOnMemory", event: "notifyOnEvent", periodic: "notifyOnPeriodic",
+                  test: "notifyOnTest", failure: "notifyOnFailure"][type]
+    if (toggle && settings[toggle] == false) return
+
+    String msg
+    if (type == "failure") {
+        msg = "${location.hub.name}: reboot FAILED (${reason}) - you may need to reboot manually"
+    } else {
+        msg = buildNotifyMessage(reason)
+    }
+
+    try {
+        notifyDevices.each { it.deviceNotification(msg) }
+        logDebug "Notification sent: ${msg}"
+    } catch (Exception e) {
+        log.error "Error sending notification: ${e.message}"
+    }
+}
+
+/** Fills in the placeholders in the user's message template. */
+private String buildNotifyMessage(String reason) {
+    String msg = notifyMessage ?: DEFAULT_NOTIFY_MESSAGE
+    if (msg.contains("%free%")) {
+        msg = msg.replace("%free%", "${getMemoryInfo()?.free ?: '?'}")
+    }
+    return msg.replace("%hub%", "${location.hub.name}")
+              .replace("%reason%", reason ?: "")
+              .replace("%uptime%", getHubUptime() ?: "unknown")
+              .replace("%now%", new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone))
+}
+
+/**
+ * True if the hub firmware is at least minVer (e.g. "2.5.0.0").
+ * Assumes current firmware if the version can't be read.
+ */
+private boolean firmwareAtLeast(String minVer) {
+    try {
+        def current = (location.hub.firmwareVersionString ?: "").tokenize('.').collect { it.toInteger() }
+        if (!current) return true
+        def wanted = minVer.tokenize('.').collect { it.toInteger() }
+        for (int i = 0; i < wanted.size(); i++) {
+            int c = i < current.size() ? current[i] : 0
+            if (c != wanted[i]) return c > wanted[i]
+        }
+        return true
+    } catch (Exception e) {
+        return true
+    }
+}
+
+/**
  * Sends the reboot (or rebuild-and-reboot) HTTP command to the hub.
  * Returns true if the command was sent successfully, false otherwise.
  */
@@ -455,9 +561,16 @@ private boolean executeReboot() {
             path: "/hub/reboot"
         ]
         if (rebuildDatabase) {
-            params.headers = ["Content-Type": "application/x-www-form-urlencoded"]
-            params.body = [rebuildDatabase: "true"]
+            // Firmware 2.5.0+ expects a JSON body; older firmware expects a form field
+            if (firmwareAtLeast("2.5.0.0")) {
+                params.headers = ["Content-Type": "application/json"]
+                params.body = '{"rebuildDatabase":true,"purgeLogs":false}'
+            } else {
+                params.headers = ["Content-Type": "application/x-www-form-urlencoded"]
+                params.body = [rebuildDatabase: "true"]
+            }
         }
+        logDebug "Reboot request: ${params}"
         httpPost(params) { resp -> }
         log.info "Reboot command sent successfully${rebuildDatabase ? ' (with DB rebuild)' : ''}"
         return true
@@ -477,6 +590,15 @@ def appButtonHandler(btn) {
             log.warn "TEST REBOOT button pressed - rebooting hub NOW"
             performReboot(true)
             break
+        case "testNotification":
+            if (!notifyDevices) {
+                log.warn "Test notification: no notification devices selected"
+            } else {
+                String msg = buildNotifyMessage("Test notification")
+                notifyDevices.each { it.deviceNotification(msg) }
+                log.info "Test notification sent: ${msg}"
+            }
+            break
     }
 }
 
@@ -494,7 +616,7 @@ def hubEventHandler(evt) {
     log.warn "═══════════════════════════════════════"
 
     // Ignore all critical events if hub has been online for less than the grace period
-    def hubUptimeSeconds = location.hub.uptime
+    long hubUptimeSeconds = getUptimeSeconds()
     if (hubUptimeSeconds < STARTUP_GRACE_SECONDS) {
         def uptimeMinutes = Math.round(hubUptimeSeconds / 60)
         log.info "Ignoring ${eventName} event - hub uptime is only ${uptimeMinutes} minute(s) (waiting ${STARTUP_GRACE_SECONDS / 60 as int} minutes)"
@@ -512,8 +634,9 @@ def hubEventHandler(evt) {
     // Perform reboot due to hub event
     def dbAction = rebuildDatabase ? " with Database Rebuild" : ""
     log.warn "Initiating hub reboot${dbAction} due to ${eventName} event"
+    sendRebootNotification("event", "${eventName} event")
 
-    // Pause briefly to ensure log messages are written
+    // Pause briefly to ensure log messages and notifications go out
     pauseExecution(2000)
 
     if (executeReboot()) {
@@ -523,6 +646,7 @@ def hubEventHandler(evt) {
         state.eventRebootCount = (state.eventRebootCount ?: 0) + 1
     } else {
         log.error "You may need to reboot manually from Settings > Reboot"
+        sendRebootNotification("failure", "${eventName} event")
     }
 }
 
@@ -532,29 +656,36 @@ def hubEventHandler(evt) {
 
 def checkMemory() {
     state.lastCheck = now()
-    
-    def memInfo = getMemoryInfo()
-    
-    if (!memInfo) {
-        log.error "Unable to retrieve memory information"
-        return
-    }
-    
-    logDebug "Memory check - Free: ${memInfo.free} MB, Used: ${memInfo.used} MB (${memInfo.percentUsed}%)"
-    
+
     // Self-migrate: if the code was updated without pressing Done, older versions'
     // one-shot schedules may still be pending. Rebuild the schedule once per version.
     if (state.scheduleVersion != VERSION) {
         log.info "Scheduler version changed (${state.scheduleVersion ?: 'none'} -> ${VERSION}) - rebuilding periodic reboot schedule"
         schedulePeriodicReboot()
     }
-    
+
+    def memInfo = getMemoryInfo()
+
+    if (!memInfo) {
+        log.error "Unable to retrieve memory information"
+        return
+    }
+
+    logDebug "Memory check - Free: ${memInfo.free} MB, Used: ${memInfo.used} MB (${memInfo.percentUsed}%)"
+
     // Check if we're below threshold
     if (memInfo.free < memoryThreshold) {
         log.warn "Free memory (${memInfo.free} MB) is below threshold (${memoryThreshold} MB)"
-        
+
         if (enableAutoReboot) {
-            if (isWithinRebootWindow()) {
+            long uptimeSecs = getUptimeSeconds()
+            long sinceLastAttempt = now() - (state.lastRebootAttempt ?: 0)
+            if (uptimeSecs < STARTUP_GRACE_SECONDS) {
+                log.info "Below threshold but hub uptime is only ${Math.round(uptimeSecs / 60)} minute(s) - " +
+                         "waiting ${STARTUP_GRACE_SECONDS / 60 as int} minutes after startup before rebooting"
+            } else if (sinceLastAttempt < EVENT_REBOOT_COOLDOWN_MS) {
+                log.warn "Below threshold but a reboot was attempted ${Math.round(sinceLastAttempt / 1000)} second(s) ago - skipping"
+            } else if (isWithinRebootWindow()) {
                 log.warn "Within reboot time window - initiating reboot"
                 performReboot(false)
             } else {
@@ -597,42 +728,28 @@ def getTotalMemoryForModel(String model) {
 
 def getMemoryInfo() {
     try {
-        // Get memory information from history endpoint
+        // Current free OS memory in KB, returned as a plain number
+        // (the history endpoint is only sampled every 5 minutes)
         def params = [
             uri: "http://127.0.0.1:8080",
-            path: "/hub/advanced/freeOSMemoryHistory",
+            path: "/hub/advanced/freeOSMemory",
+            textParser: true,
             timeout: 5
         ]
 
         def freeMemKB = null
-        def totalMemKB = null
 
         httpGet(params) { resp ->
             if (resp.success) {
-                String historyData = resp.data.text
-                def lines = historyData.split('\n')
-
-                // Get the last data line (skip header)
-                // Format: Date/time,Free OS,5m CPU avg,Total Java,Free Java,Direct Java
-                def dataLines = lines.findAll { line ->
-                    line.trim() && !line.startsWith('Date/time')
-                }
-
-                if (dataLines.size() > 0) {
-                    def lastLine = dataLines.last()
-                    def values = lastLine.split(',')
-
-                    if (values.size() >= 4) {
-                        // Column 1 = Free OS memory (KB)
-                        freeMemKB = values[1].trim().toLong()
-                        // Column 3 = Total Java memory (KB)
-                        totalMemKB = values[3].trim().toLong()
-                    }
+                def raw = resp.data
+                String text = (raw instanceof String) ? raw : raw?.text
+                if (text?.trim()?.isNumber()) {
+                    freeMemKB = text.trim().toBigDecimal().toLong()
                 }
             }
         }
 
-        if (freeMemKB != null && totalMemKB != null) {
+        if (freeMemKB != null) {
             // Convert KB to MB
             def freeMemMB = Math.round(freeMemKB / 1024)
 
@@ -717,16 +834,23 @@ def performReboot(isTest) {
         log.warn "═══════════════════════════════════════"
     }
 
-    if (!isTest) {
-        state.lastReboot = now()
-        state.rebootCount = (state.rebootCount ?: 0) + 1
-    }
+    state.lastRebootAttempt = now()
 
-    // Pause briefly to ensure log message is written
+    def notifyReason = isTest ? "Test reboot" : "Low memory (${memInfo?.free} MB free)"
+    sendRebootNotification(isTest ? "test" : "memory", notifyReason)
+
+    // Pause briefly to ensure log messages and notifications go out
     pauseExecution(2000)
-    
-    if (!executeReboot()) {
+
+    if (executeReboot()) {
+        // Only record the reboot in state if the command was actually sent
+        if (!isTest) {
+            state.lastReboot = now()
+            state.rebootCount = (state.rebootCount ?: 0) + 1
+        }
+    } else {
         log.error "You may need to reboot manually from Settings > Reboot"
+        sendRebootNotification("failure", notifyReason)
     }
 }
 
@@ -833,7 +957,10 @@ def periodicRebootCheck() {
     log.warn "Frequency: ${freq}, Day: ${periodicDayOfWeek}, Hub uptime: ${formatDays(uptimeSecs)} days"
     log.warn "═══════════════════════════════════════"
 
-    // Pause briefly to ensure log messages are written
+    def notifyReason = "Periodic ${freq} reboot"
+    sendRebootNotification("periodic", notifyReason)
+
+    // Pause briefly to ensure log messages and notifications go out
     pauseExecution(3000)
 
     if (executeReboot()) {
@@ -841,6 +968,7 @@ def periodicRebootCheck() {
         state.periodicRebootCount = (state.periodicRebootCount ?: 0) + 1
     } else {
         log.error "Periodic reboot command failed - you may need to reboot manually"
+        sendRebootNotification("failure", notifyReason)
     }
 }
 
