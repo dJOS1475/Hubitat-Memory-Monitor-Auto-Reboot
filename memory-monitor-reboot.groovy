@@ -16,10 +16,17 @@
  *  - Detailed logging
  *  - Memory status tracking
  *
- *  Version: 1.3.0
+ *  Version: 1.3.1
  *  Author: Derek Osborn
- *  Date: 2026-02-06
+ *  Date: 2026-11-10
  *
+ *  v1.3.1 - Rewrote periodic reboot scheduler. It now uses a weekly cron schedule on the
+ *           chosen day/time (survives reboots, can't break the chain or go stale) and decides
+ *           at each firing whether enough uptime has accrued for the chosen frequency.
+ *           "Enable Debug Logging" now only affects logging - it no longer switches the
+ *           scheduler into a daily "debug mode" (which caused daily reboots).
+ *           Monthly now requires 22+ days uptime so it can't fire at week 3.
+ *           Existing schedules from older versions migrate automatically.
  *  v1.3.0 - Code quality improvements: extracted reboot helper, eliminated duplicated
  *           frequency/uptime logic, added event reboot cooldown, fixed state updates
  *           on failed reboots, added unsubscribe to uninstalled(), replaced deprecated
@@ -49,7 +56,7 @@
 
 import groovy.transform.Field
 
-@Field static final String VERSION = "1.3.0"
+@Field static final String VERSION = "1.3.1"
 @Field static final int STARTUP_GRACE_SECONDS = 300  // 5 minutes
 @Field static final long EVENT_REBOOT_COOLDOWN_MS = 60000  // 1 minute cooldown between event reboots
 
@@ -190,10 +197,6 @@ def mainPage() {
                     required: true,
                     defaultValue: "weekly"
 
-                if (enableDebug) {
-                    paragraph "<i>Debug Mode: Reboot will be scheduled for today at the specified time, regardless of day selection or hub uptime.</i>"
-                }
-                
                 input "periodicDayOfWeek", "enum",
                     title: "Day of Week",
                     description: "Which day to perform the reboot",
@@ -214,6 +217,9 @@ def mainPage() {
                     description: "Time to perform the scheduled reboot",
                     required: true
                 
+                paragraph "<i>The hub is checked every week on the chosen day and time, and only reboots once its uptime " +
+                          "has reached the minimum for the chosen frequency (weekly: 4.9 days, fortnightly: 9.8 days, " +
+                          "monthly: 22 days). A manual or memory-triggered reboot therefore pushes the next scheduled reboot back automatically.</i>"
                 paragraph "<i>Note: Periodic reboots will use the database rebuild setting configured above.</i>"
             }
         }
@@ -278,8 +284,13 @@ def mainPage() {
             if (state.lastPeriodicReboot) {
                 paragraph "<b>Last Periodic Reboot:</b> ${new Date(state.lastPeriodicReboot).format('yyyy-MM-dd HH:mm:ss')}"
             }
-            if (state.nextPeriodicReboot && enablePeriodicReboot) {
-                paragraph "<b>Next Scheduled Reboot:</b> ${new Date(state.nextPeriodicReboot).format('yyyy-MM-dd HH:mm:ss')}"
+            if (enablePeriodicReboot && periodicDayOfWeek && periodicRebootTime) {
+                def nextReboot = getNextPeriodicReboot()
+                if (nextReboot) {
+                    state.nextPeriodicReboot = nextReboot.time
+                    paragraph "<b>Next Scheduled Reboot:</b> ${nextReboot.format('yyyy-MM-dd HH:mm:ss', location.timeZone)} " +
+                              "<i>(assuming no other reboot before then)</i>"
+                }
             }
             if (state.rebootCount) {
                 paragraph "<b>Total Auto Reboots:</b> ${state.rebootCount}"
@@ -379,10 +390,8 @@ def initialize() {
         log.info "Auto-reboot is DISABLED"
     }
     
-    // Schedule periodic reboots
-    if (enablePeriodicReboot && periodicDayOfWeek && periodicRebootTime) {
-        schedulePeriodicReboot()
-    }
+    // Schedule (or clear) the weekly periodic reboot check
+    schedulePeriodicReboot()
     
     // Do an initial check
     runIn(5, checkMemory)
@@ -406,10 +415,25 @@ private int getFrequencyDays(String freq = null) {
 }
 
 /**
- * Returns the required uptime in seconds (70 % of the frequency interval).
+ * Returns the uptime (seconds) the hub must have before a periodic reboot is performed.
+ * Normally 70% of the interval, but never less than (interval - 6 days) so that a
+ * weekly check can't trigger a monthly reboot at week 3.
+ *   weekly 4.9d, fortnightly 9.8d, monthly 22d
  */
 private long getRequiredUptimeSeconds(String freq = null) {
-    return (long)((getFrequencyDays(freq) * 24L * 60L * 60L) * 0.7)
+    long intervalSecs = getFrequencyDays(freq) * 86400L
+    long seventyPct = (long)(intervalSecs * 0.7)
+    long floorSecs = intervalSecs - (6L * 86400L)
+    return Math.max(seventyPct, floorSecs)
+}
+
+/** Current hub uptime in seconds (0 if unavailable). */
+private long getUptimeSeconds() {
+    try {
+        return (location.hub.uptime ?: 0) as long
+    } catch (Exception e) {
+        return 0L
+    }
 }
 
 /**
@@ -441,15 +465,6 @@ private boolean executeReboot() {
         log.error "Error sending reboot command: ${e.message}"
         return false
     }
-}
-
-/**
- * Advances a Calendar by the appropriate number of days for the
- * current periodic frequency and returns the resulting Date.
- */
-private Date advanceByFrequency(Calendar calendar, String freq = null) {
-    calendar.add(Calendar.DAY_OF_MONTH, getFrequencyDays(freq))
-    return calendar.time
 }
 
 // ──────────────────────────────────────────────
@@ -527,9 +542,11 @@ def checkMemory() {
     
     logDebug "Memory check - Free: ${memInfo.free} MB, Used: ${memInfo.used} MB (${memInfo.percentUsed}%)"
     
-    // Check if periodic reboot needs to be rescheduled based on uptime
-    if (enablePeriodicReboot && state.nextPeriodicReboot) {
-        checkAndUpdatePeriodicReboot()
+    // Self-migrate: if the code was updated without pressing Done, older versions'
+    // one-shot schedules may still be pending. Rebuild the schedule once per version.
+    if (state.scheduleVersion != VERSION) {
+        log.info "Scheduler version changed (${state.scheduleVersion ?: 'none'} -> ${VERSION}) - rebuilding periodic reboot schedule"
+        schedulePeriodicReboot()
     }
     
     // Check if we're below threshold
@@ -548,42 +565,6 @@ def checkMemory() {
         }
     } else {
         logDebug "Memory levels OK - ${memInfo.free} MB free (threshold: ${memoryThreshold} MB)"
-    }
-}
-
-def checkAndUpdatePeriodicReboot() {
-    // Skip uptime check in debug mode
-    if (enableDebug) {
-        return
-    }
-
-    // Check if hub uptime is at least 70% of scheduled interval
-    def hubUptimeSeconds = location.hub.uptime
-    def requiredSeconds = getRequiredUptimeSeconds()
-
-    // Check if next scheduled reboot is coming up soon (within 24 hours)
-    def nowMs = new Date().time
-    def nextReboot = state.nextPeriodicReboot
-    def hoursUntilReboot = (nextReboot - nowMs) / (1000 * 60 * 60)
-
-    // Only check if reboot is scheduled within next 24 hours and uptime is insufficient
-    if (hoursUntilReboot <= 24 && hoursUntilReboot > 0 && hubUptimeSeconds < requiredSeconds) {
-        def uptimeDays = formatDays(hubUptimeSeconds)
-        def requiredDays = formatDays(requiredSeconds)
-
-        log.info "Upcoming periodic reboot check: Hub uptime (${uptimeDays} days) is less than required (${requiredDays} days)"
-        log.info "Next reboot will be skipped - rescheduling for next ${periodicFrequency ?: 'weekly'} occurrence"
-
-        // Reschedule to next occurrence
-        def calendar = Calendar.getInstance(location.timeZone)
-        calendar.setTime(new Date(nextReboot))
-        def newNextReboot = advanceByFrequency(calendar)
-
-        state.nextPeriodicReboot = newNextReboot.time
-        unschedule(performPeriodicReboot)
-        runOnce(newNextReboot, performPeriodicReboot)
-
-        log.info "Periodic reboot rescheduled to ${newNextReboot.format('yyyy-MM-dd HH:mm:ss')}"
     }
 }
 
@@ -753,120 +734,125 @@ def performReboot(isTest) {
 //  Periodic reboot scheduling
 // ──────────────────────────────────────────────
 
+/**
+ * Sets up the periodic reboot check as a weekly cron job on the chosen day and time.
+ * A cron schedule persists across hub reboots and never needs re-arming, so it
+ * can't be lost or go stale the way a chain of runOnce() calls can.
+ */
 def schedulePeriodicReboot() {
-    def now = new Date()
-    def rebootTime = timeToday(periodicRebootTime, location.timeZone)
+    // Clear any schedule from this or older versions (older versions used runOnce)
+    unschedule("periodicRebootCheck")
+    unschedule("performPeriodicReboot")
+    state.scheduleVersion = VERSION
 
-    // Handle debug mode - schedule for today at the specified time
-    if (enableDebug) {
-        def nextReboot
-        if (rebootTime <= now) {
-            // Time has already passed today, schedule for tomorrow
-            def calendar = Calendar.getInstance(location.timeZone)
-            calendar.setTime(rebootTime)
-            calendar.add(Calendar.DAY_OF_MONTH, 1)
-            nextReboot = calendar.time
-        } else {
-            nextReboot = rebootTime
-        }
-
-        state.nextPeriodicReboot = nextReboot.time
-        runOnce(nextReboot, performPeriodicReboot)
-
-        log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (debug mode - ignoring day/uptime checks)"
+    if (!(enablePeriodicReboot && periodicDayOfWeek && periodicRebootTime)) {
+        state.remove("nextPeriodicReboot")
         return
     }
 
-    // Calculate next reboot time based on frequency and day of week
-    // Start with today's reboot time
-    def calendar = Calendar.getInstance(location.timeZone)
-    calendar.setTime(rebootTime)
+    def rebootTime = timeToday(periodicRebootTime, location.timeZone)
+    def hour = rebootTime.format("H", location.timeZone)
+    def minute = rebootTime.format("m", location.timeZone)
+    def cron = "0 ${minute} ${hour} ? * ${periodicDayOfWeek}"
 
-    def targetDayOfWeek = getDayOfWeekNumber(periodicDayOfWeek)
-    def currentDayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
+    schedule(cron, "periodicRebootCheck")
 
-    // Calculate days until target day of week
-    def daysToAdd = targetDayOfWeek - currentDayOfWeek
-    if (daysToAdd < 0) {
-        daysToAdd += 7
+    def nextReboot = getNextPeriodicReboot()
+    state.nextPeriodicReboot = nextReboot?.time
+
+    log.info "Periodic reboot check scheduled every ${getDayName(periodicDayOfWeek)} at ${rebootTime.format('HH:mm', location.timeZone)} " +
+             "(cron: ${cron}); frequency ${periodicFrequency ?: 'weekly'}, minimum uptime ${formatDays(getRequiredUptimeSeconds())} days"
+    if (nextReboot) {
+        log.info "Next periodic reboot expected ${nextReboot.format('yyyy-MM-dd HH:mm', location.timeZone)}"
     }
-
-    // If target day is today but time has passed, add days based on frequency
-    if (daysToAdd == 0 && rebootTime <= now) {
-        daysToAdd = getFrequencyDays()
-    }
-
-    calendar.add(Calendar.DAY_OF_MONTH, daysToAdd)
-    def nextReboot = calendar.time
-
-    // Store next reboot time
-    state.nextPeriodicReboot = nextReboot.time
-
-    // Schedule the reboot
-    runOnce(nextReboot, performPeriodicReboot)
-
-    log.info "Periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')} (${periodicFrequency ?: 'weekly'}, ${periodicDayOfWeek})"
 }
 
-def performPeriodicReboot() {
-    log.warn "═══════════════════════════════════════"
-    log.warn "PERFORMING PERIODIC SCHEDULED REBOOT"
-    log.warn "Frequency: ${periodicFrequency ?: 'weekly'}, Day: ${periodicDayOfWeek}${enableDebug ? ' (debug mode)' : ''}"
-    log.warn "═══════════════════════════════════════"
+/**
+ * Projects the next date the weekly check will actually reboot the hub, assuming
+ * no other reboot happens first: the first chosen-weekday occurrence at which
+ * projected uptime meets the requirement for the chosen frequency.
+ */
+Date getNextPeriodicReboot() {
+    if (!(periodicDayOfWeek && periodicRebootTime)) return null
 
-    // Skip uptime check in debug mode
-    if (!enableDebug) {
-        // Final uptime check (should have already been checked during polling)
-        def hubUptimeSeconds = location.hub.uptime
-        def requiredSeconds = getRequiredUptimeSeconds()
-
-        if (hubUptimeSeconds < requiredSeconds) {
-            def uptimeDays = formatDays(hubUptimeSeconds)
-            def requiredDays = formatDays(requiredSeconds)
-            log.warn "Skipping periodic reboot - Hub uptime (${uptimeDays} days) is less than 70% of ${periodicFrequency ?: 'weekly'} interval (${requiredDays} days required)"
-
-            // Reschedule for next occurrence
-            def calendar = Calendar.getInstance(location.timeZone)
-            calendar.setTime(new Date(state.nextPeriodicReboot))
-            def nextReboot = advanceByFrequency(calendar)
-
-            state.nextPeriodicReboot = nextReboot.time
-            runOnce(nextReboot, performPeriodicReboot)
-
-            log.info "Next periodic reboot check scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')}"
-            return
-        }
-
-        log.warn "Hub uptime is sufficient (${formatDays(hubUptimeSeconds)} days) - proceeding with reboot"
-    }
-
-    state.lastPeriodicReboot = now()
-    state.periodicRebootCount = (state.periodicRebootCount ?: 0) + 1
-
-    // Schedule next periodic reboot BEFORE rebooting
+    def nowDate = new Date()
     def calendar = Calendar.getInstance(location.timeZone)
-    calendar.setTime(new Date(state.nextPeriodicReboot))
+    calendar.setTime(timeToday(periodicRebootTime, location.timeZone))
 
-    if (enableDebug) {
-        // In debug mode, schedule for tomorrow at the same time
-        calendar.add(Calendar.DAY_OF_MONTH, 1)
-    } else {
-        advanceByFrequency(calendar)
+    int daysToAdd = getDayOfWeekNumber(periodicDayOfWeek) - calendar.get(Calendar.DAY_OF_WEEK)
+    if (daysToAdd < 0) daysToAdd += 7
+    calendar.add(Calendar.DAY_OF_MONTH, daysToAdd)
+    if (!calendar.time.after(nowDate)) calendar.add(Calendar.DAY_OF_MONTH, 7)
+
+    long uptimeNow = getUptimeSeconds()
+    long required = getRequiredUptimeSeconds()
+
+    // At most 5 weekly occurrences are ever needed (monthly = 4 weeks)
+    for (int i = 0; i < 6; i++) {
+        long secsUntil = (long)((calendar.time.time - nowDate.time).intdiv(1000L))
+        long projectedUptime = uptimeNow + secsUntil
+        if (projectedUptime >= required) return calendar.time
+        calendar.add(Calendar.DAY_OF_MONTH, 7)
+    }
+    return calendar.time
+}
+
+/**
+ * Cron handler - runs every week on the chosen day/time and reboots only if the hub
+ * has been up long enough for the chosen frequency.
+ */
+def periodicRebootCheck() {
+    if (!enablePeriodicReboot) {
+        logDebug "Periodic reboot check fired but periodic reboot is disabled - ignoring"
+        return
     }
 
-    def nextReboot = calendar.time
+    // Guard: only act on the configured weekday
+    def todayNum = Calendar.getInstance(location.timeZone).get(Calendar.DAY_OF_WEEK)
+    if (todayNum != getDayOfWeekNumber(periodicDayOfWeek)) {
+        log.info "Periodic reboot check fired on a day other than ${getDayName(periodicDayOfWeek)} (old schedule) - ignoring and rebuilding schedule"
+        schedulePeriodicReboot()
+        return
+    }
 
-    state.nextPeriodicReboot = nextReboot.time
-    runOnce(nextReboot, performPeriodicReboot)
+    long uptimeSecs = getUptimeSeconds()
+    long requiredSecs = getRequiredUptimeSeconds()
+    def freq = periodicFrequency ?: "weekly"
 
-    log.info "Next periodic reboot scheduled for ${nextReboot.format('yyyy-MM-dd HH:mm:ss')}"
-    
-    // Pause briefly to ensure log messages and state are written
+    if (uptimeSecs < requiredSecs) {
+        log.info "Periodic reboot check: skipping - hub uptime ${formatDays(uptimeSecs)} days is below the ${formatDays(requiredSecs)} days required for ${freq} reboots"
+        state.lastPeriodicSkip = now()
+        def nextReboot = getNextPeriodicReboot()
+        state.nextPeriodicReboot = nextReboot?.time
+        if (nextReboot) log.info "Next periodic reboot expected ${nextReboot.format('yyyy-MM-dd HH:mm', location.timeZone)}"
+        return
+    }
+
+    log.warn "═══════════════════════════════════════"
+    log.warn "PERFORMING PERIODIC SCHEDULED REBOOT${rebuildDatabase ? ' with Database Rebuild' : ''}"
+    log.warn "Frequency: ${freq}, Day: ${periodicDayOfWeek}, Hub uptime: ${formatDays(uptimeSecs)} days"
+    log.warn "═══════════════════════════════════════"
+
+    // Pause briefly to ensure log messages are written
     pauseExecution(3000)
-    
-    if (!executeReboot()) {
+
+    if (executeReboot()) {
+        state.lastPeriodicReboot = now()
+        state.periodicRebootCount = (state.periodicRebootCount ?: 0) + 1
+    } else {
         log.error "Periodic reboot command failed - you may need to reboot manually"
     }
+}
+
+/**
+ * Legacy handler name used by v1.3.0 and earlier (runOnce chain). If an old pending
+ * schedule fires after upgrading, convert to the new cron schedule and run the
+ * normal check (which verifies day and uptime before rebooting).
+ */
+def performPeriodicReboot() {
+    log.info "Legacy periodic reboot schedule fired - migrating to weekly schedule"
+    schedulePeriodicReboot()
+    periodicRebootCheck()
 }
 
 // ──────────────────────────────────────────────
@@ -884,6 +870,12 @@ def getDayOfWeekNumber(dayCode) {
         case "SAT": return Calendar.SATURDAY
         default: return Calendar.SUNDAY
     }
+}
+
+def getDayName(dayCode) {
+    def names = [SUN: "Sunday", MON: "Monday", TUE: "Tuesday", WED: "Wednesday",
+                 THU: "Thursday", FRI: "Friday", SAT: "Saturday"]
+    return names[dayCode] ?: dayCode
 }
 
 def logDebug(msg) {
