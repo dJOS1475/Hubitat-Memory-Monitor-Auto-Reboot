@@ -4,7 +4,7 @@
 	"author": "Derek Osborn",
 	"version": "1.4.1",
 	"dateReleased": "2026-11-10",
-	"releaseNotes": "v1.4.1 - Added "Disable Smart Reboot" (off by default) for periodic reboots on a fixed frequency and given the UI an overhaul",
+	"releaseNotes": "v1.4.1 - Added Disable Smart Reboot (off by default) for periodic reboots on a fixed frequency and given the UI an overhaul",
 	"communityLink": "https://community.hubitat.com/t/release-memory-monitor-auto-reboot-application/160272",
 	"apps" : [
 		{
