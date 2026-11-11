@@ -27,6 +27,7 @@
  *           Schedule onto their own pages, linked from the main page with a summary of each.
  *           Moved Test Reboot and Logging onto a new Advanced page.
  *           Memory Monitoring now shows hub status and statistics side by side.
+ *           Fixed a StackOverflowError on the main page for clean installs.
  *  v1.4.0 - Added a Notifications page: send reboot alerts to notification devices (e.g. the
  *           Hubitat mobile app), with a message template, per-reboot-type toggles,
  *           failed-reboot alerts and a Send Test Notification button.
@@ -326,7 +327,7 @@ def periodicRebootPage() {
 
 /** One-line summaries shown under each settings link on the main page. */
 private String rebootSettingsSummary() {
-    def parts = ["Threshold: ${getMemoryThreshold()} MB"]
+    def parts = ["Threshold: ${thresholdMB()} MB"]
     if (enableAutoReboot) {
         def window = (rebootStartTime && rebootEndTime) ? " (${formatTimeSetting(rebootStartTime)}-${formatTimeSetting(rebootEndTime)})" : ""
         parts << "Auto reboot: on${window}"
@@ -364,8 +365,8 @@ private String formatTimeSetting(String timeSetting) {
 }
 
 /** Memory threshold in MB, falling back to the default if the setting was never saved. */
-private int getMemoryThreshold() {
-    return (memoryThreshold ?: 200) as int
+private int thresholdMB() {
+    return (settings.memoryThreshold ?: 200) as int
 }
 
 def advancedPage() {
@@ -498,7 +499,7 @@ def initialize() {
     }
     
     log.info "Memory monitoring initialized - checking every ${interval} minute(s)"
-    log.info "Threshold: ${getMemoryThreshold()} MB free memory"
+    log.info "Threshold: ${thresholdMB()} MB free memory"
     
     if (enableAutoReboot) {
         log.info "Auto-reboot enabled for time window: ${rebootStartTime} to ${rebootEndTime}"
@@ -741,8 +742,8 @@ def checkMemory() {
     logDebug "Memory check - Free: ${memInfo.free} MB, Used: ${memInfo.used} MB (${memInfo.percentUsed}%)"
 
     // Check if we're below threshold
-    if (memInfo.free < getMemoryThreshold()) {
-        log.warn "Free memory (${memInfo.free} MB) is below threshold (${getMemoryThreshold()} MB)"
+    if (memInfo.free < thresholdMB()) {
+        log.warn "Free memory (${memInfo.free} MB) is below threshold (${thresholdMB()} MB)"
 
         if (enableAutoReboot) {
             long uptimeSecs = getUptimeSeconds()
@@ -762,7 +763,7 @@ def checkMemory() {
             log.info "Auto-reboot is disabled - no action taken"
         }
     } else {
-        logDebug "Memory levels OK - ${memInfo.free} MB free (threshold: ${getMemoryThreshold()} MB)"
+        logDebug "Memory levels OK - ${memInfo.free} MB free (threshold: ${thresholdMB()} MB)"
     }
 }
 
