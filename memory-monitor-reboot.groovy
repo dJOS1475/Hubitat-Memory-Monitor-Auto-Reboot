@@ -17,10 +17,13 @@
  *  - Memory status tracking
  *  - Push notifications on reboot (separate Notifications page)
  *
- *  Version: 1.4.1
+ *  Version: 1.4.2
  *  Author: Derek Osborn
  *  Date: 2026-11-11
  *
+ *  v1.4.2 - Tidied the Statistics column so it lines up with the hub status column:
+ *           grouped lines, shorter dates, event type shown with the last event reboot,
+ *           and reboot totals on one line.
  *  v1.4.1 - Added "Disable Smart Reboot" (off by default) for periodic reboots on a fixed
  *           frequency, counted from the last periodic reboot and ignoring other reboots.
  *           Moved Reboot Settings + Time Window, Hub Event Monitoring and Periodic Reboot
@@ -74,7 +77,7 @@
 
 import groovy.transform.Field
 
-@Field static final String VERSION = "1.4.1"
+@Field static final String VERSION = "1.4.2"
 @Field static final int STARTUP_GRACE_SECONDS = 300  // 5 minutes
 @Field static final long EVENT_REBOOT_COOLDOWN_MS = 60000  // 1 minute cooldown between event reboots
 @Field static final String DEFAULT_NOTIFY_MESSAGE = "%hub% is rebooting - %reason%"
@@ -168,28 +171,40 @@ private String hubStatusHtml() {
     return lines.join("<br>")
 }
 
-/** Right column of the Memory Monitoring section: check and reboot statistics. */
+/**
+ * Right column of the Memory Monitoring section: check and reboot statistics.
+ * Laid out in three groups that line up with the left column's groups.
+ */
 private String statisticsHtml() {
-    def fmt = { Long ms -> new Date(ms).format('yyyy-MM-dd HH:mm:ss', location.timeZone) }
-    def lines = ["<b>Statistics</b>"]
-    if (state.lastCheck) lines << "<b>Last Check:</b> ${fmt(state.lastCheck as Long)}"
-    if (state.lastReboot) lines << "<b>Last Auto Reboot:</b> ${fmt(state.lastReboot as Long)}"
-    if (state.lastEventReboot) lines << "<b>Last Event-Triggered Reboot:</b> ${fmt(state.lastEventReboot as Long)}"
-    if (state.lastEventType) lines << "<b>Last Event Type:</b> ${state.lastEventType}"
-    if (state.lastPeriodicReboot) lines << "<b>Last Periodic Reboot:</b> ${fmt(state.lastPeriodicReboot as Long)}"
+    def fmt = { Long ms -> new Date(ms).format('yyyy-MM-dd HH:mm', location.timeZone) }
+
+    // Group 1: checks and the next scheduled reboot (beside Version / Hub Model)
+    def checks = []
+    checks << "<b>Last Check:</b> ${state.lastCheck ? fmt(state.lastCheck as Long) : 'Not yet'}"
     if (enablePeriodicReboot && periodicDayOfWeek && periodicRebootTime) {
         def nextReboot = getNextPeriodicReboot()
         if (nextReboot) {
             state.nextPeriodicReboot = nextReboot.time
-            lines << "<b>Next Scheduled Reboot:</b> ${fmt(nextReboot.time)}" +
-                     (disableSmartReboot ? "" : " <i>(assuming no other reboot before then)</i>")
+            checks << "<b>Next Scheduled Reboot:</b> ${fmt(nextReboot.time)}" +
+                      (disableSmartReboot ? "" : " <i>(if no other reboot first)</i>")
         }
     }
-    if (state.rebootCount) lines << "<b>Total Auto Reboots:</b> ${state.rebootCount}"
-    if (state.eventRebootCount) lines << "<b>Total Event-Triggered Reboots:</b> ${state.eventRebootCount}"
-    if (state.periodicRebootCount) lines << "<b>Total Periodic Reboots:</b> ${state.periodicRebootCount}"
-    if (lines.size() == 1) lines << "<i>No checks or reboots recorded yet</i>"
-    return lines.join("<br>")
+
+    // Group 2: most recent reboot of each type (beside the memory figures)
+    def recent = []
+    if (state.lastReboot) recent << "<b>Last Low-Memory Reboot:</b> ${fmt(state.lastReboot as Long)}"
+    if (state.lastEventReboot) {
+        recent << "<b>Last Event Reboot:</b> ${fmt(state.lastEventReboot as Long)}" +
+                  (state.lastEventType ? " (${state.lastEventType})" : "")
+    }
+    if (state.lastPeriodicReboot) recent << "<b>Last Periodic Reboot:</b> ${fmt(state.lastPeriodicReboot as Long)}"
+    if (!recent) recent << "<b>Last Reboot:</b> None recorded yet"
+
+    // Group 3: reboot totals on one line (beside Hub Uptime)
+    def totals = "<b>Total Reboots:</b> ${state.rebootCount ?: 0} low-memory, " +
+                 "${state.eventRebootCount ?: 0} event, ${state.periodicRebootCount ?: 0} periodic"
+
+    return [checks.join("<br>"), recent.join("<br>"), totals].join("<br><br>")
 }
 
 def rebootSettingsPage() {

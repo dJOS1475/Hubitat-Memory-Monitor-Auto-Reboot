@@ -2,9 +2,9 @@
 	"packageName": "Hub Health Monitor & Auto Reboot",
 	"minimumHEVersion": "2.5.0",
 	"author": "Derek Osborn",
-	"version": "1.4.1",
+	"version": "1.4.2",
 	"dateReleased": "2026-11-10",
-	"releaseNotes": "v1.4.1 - Added Disable Smart Reboot (off by default) for periodic reboots and UI overhaul",
+	"releaseNotes": "v1.4.2 - Tidied the Statistics column so it lines up with the hub status column",
 	"communityLink": "https://community.hubitat.com/t/release-memory-monitor-auto-reboot-application/160272",
 	"apps" : [
 		{
