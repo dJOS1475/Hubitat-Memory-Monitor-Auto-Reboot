@@ -17,10 +17,16 @@
  *  - Memory status tracking
  *  - Push notifications on reboot (separate Notifications page)
  *
- *  Version: 1.4.0
+ *  Version: 1.4.1
  *  Author: Derek Osborn
- *  Date: 2026-11-10
+ *  Date: 2026-11-11
  *
+ *  v1.4.1 - Added "Disable Smart Reboot" (off by default) for periodic reboots on a fixed
+ *           frequency, counted from the last periodic reboot and ignoring other reboots.
+ *           Moved Reboot Settings + Time Window, Hub Event Monitoring and Periodic Reboot
+ *           Schedule onto their own pages, linked from the main page with a summary of each.
+ *           Moved Test Reboot and Logging onto a new Advanced page.
+ *           Memory Monitoring now shows hub status and statistics side by side.
  *  v1.4.0 - Added a Notifications page: send reboot alerts to notification devices (e.g. the
  *           Hubitat mobile app), with a message template, per-reboot-type toggles,
  *           failed-reboot alerts and a Send Test Notification button.
@@ -67,7 +73,7 @@
 
 import groovy.transform.Field
 
-@Field static final String VERSION = "1.4.0"
+@Field static final String VERSION = "1.4.1"
 @Field static final int STARTUP_GRACE_SECONDS = 300  // 5 minutes
 @Field static final long EVENT_REBOOT_COOLDOWN_MS = 60000  // 1 minute cooldown between event reboots
 @Field static final String DEFAULT_NOTIFY_MESSAGE = "%hub% is rebooting - %reason%"
@@ -86,7 +92,11 @@ definition(
 
 preferences {
     page(name: "mainPage")
+    page(name: "rebootSettingsPage")
+    page(name: "eventMonitoringPage")
+    page(name: "periodicRebootPage")
     page(name: "notificationPage")
+    page(name: "advancedPage")
 }
 
 // ──────────────────────────────────────────────
@@ -98,68 +108,131 @@ def mainPage() {
         sectionHR()
 
         section("<b>Memory Monitoring</b>") {
-            paragraph "<b>Version:</b> ${VERSION}"
-            def hubModel = getHubModel()
-            paragraph "<b>Hub Model:</b> ${hubModel ?: 'Unknown'}"
-            paragraph "Current Hub Memory Status:"
-            def memInfo = getMemoryInfo()
-            if (memInfo) {
-                paragraph "<b>Free Memory:</b> ${memInfo.free} MB<br>" +
-                         "<b>Total Memory:</b> ${memInfo.total} MB<br>" +
-                         "<b>Used Memory:</b> ${memInfo.used} MB<br>" +
-                         "<b>Usage:</b> ${memInfo.percentUsed}%"
-            } else {
-                paragraph "Unable to retrieve memory information"
-            }
-
-            def uptime = getHubUptime()
-            if (uptime) {
-                paragraph "<br><b>Hub Uptime:</b> ${uptime}"
-            }
+            paragraph "<div style='display:flex; flex-wrap:wrap; gap:16px 32px;'>" +
+                      "<div style='flex:1 1 260px;'>${hubStatusHtml()}</div>" +
+                      "<div style='flex:1 1 260px;'>${statisticsHtml()}</div>" +
+                      "</div>"
         }
 
         sectionHR()
 
+        section("<b>Settings</b>") {
+            href "rebootSettingsPage", title: "Reboot Settings", description: rebootSettingsSummary()
+            href "eventMonitoringPage", title: "Hub Event Monitoring", description: eventMonitoringSummary()
+            href "periodicRebootPage", title: "Periodic Reboot Schedule", description: periodicRebootSummary()
+            def notifyDesc = notifyDevices ? "Sending to: ${notifyDevices.join(', ')}" : "Not configured - tap to set up"
+            href "notificationPage", title: "Notification Settings", description: notifyDesc
+            href "advancedPage", title: "Advanced", description: "Test reboot and logging (debug logging: ${enableDebug ? 'on' : 'off'})"
+        }
+
+        sectionHR()
+
+        section("<b>Monitoring Schedule</b>") {
+            input "checkInterval", "enum",
+                title: "Memory Check Interval",
+                description: "How often to check memory usage",
+                options: [
+                    "1": "Every 1 minute",
+                    "5": "Every 5 minutes",
+                    "10": "Every 10 minutes",
+                    "15": "Every 15 minutes",
+                    "30": "Every 30 minutes",
+                    "60": "Every 1 hour"
+                ],
+                defaultValue: "15",
+                required: true
+        }
+    }
+}
+
+/** Left column of the Memory Monitoring section: version, hub model, memory and uptime. */
+private String hubStatusHtml() {
+    def lines = ["<b>Version:</b> ${VERSION}",
+                 "<b>Hub Model:</b> ${getHubModel() ?: 'Unknown'}",
+                 ""]
+    def memInfo = getMemoryInfo()
+    if (memInfo) {
+        lines << "<b>Free Memory:</b> ${memInfo.free} MB"
+        lines << "<b>Total Memory:</b> ${memInfo.total} MB"
+        lines << "<b>Used Memory:</b> ${memInfo.used} MB"
+        lines << "<b>Usage:</b> ${memInfo.percentUsed}%"
+    } else {
+        lines << "Unable to retrieve memory information"
+    }
+    def uptime = getHubUptime()
+    if (uptime) {
+        lines << ""
+        lines << "<b>Hub Uptime:</b> ${uptime}"
+    }
+    return lines.join("<br>")
+}
+
+/** Right column of the Memory Monitoring section: check and reboot statistics. */
+private String statisticsHtml() {
+    def fmt = { Long ms -> new Date(ms).format('yyyy-MM-dd HH:mm:ss', location.timeZone) }
+    def lines = ["<b>Statistics</b>"]
+    if (state.lastCheck) lines << "<b>Last Check:</b> ${fmt(state.lastCheck as Long)}"
+    if (state.lastReboot) lines << "<b>Last Auto Reboot:</b> ${fmt(state.lastReboot as Long)}"
+    if (state.lastEventReboot) lines << "<b>Last Event-Triggered Reboot:</b> ${fmt(state.lastEventReboot as Long)}"
+    if (state.lastEventType) lines << "<b>Last Event Type:</b> ${state.lastEventType}"
+    if (state.lastPeriodicReboot) lines << "<b>Last Periodic Reboot:</b> ${fmt(state.lastPeriodicReboot as Long)}"
+    if (enablePeriodicReboot && periodicDayOfWeek && periodicRebootTime) {
+        def nextReboot = getNextPeriodicReboot()
+        if (nextReboot) {
+            state.nextPeriodicReboot = nextReboot.time
+            lines << "<b>Next Scheduled Reboot:</b> ${fmt(nextReboot.time)}" +
+                     (disableSmartReboot ? "" : " <i>(assuming no other reboot before then)</i>")
+        }
+    }
+    if (state.rebootCount) lines << "<b>Total Auto Reboots:</b> ${state.rebootCount}"
+    if (state.eventRebootCount) lines << "<b>Total Event-Triggered Reboots:</b> ${state.eventRebootCount}"
+    if (state.periodicRebootCount) lines << "<b>Total Periodic Reboots:</b> ${state.periodicRebootCount}"
+    if (lines.size() == 1) lines << "<i>No checks or reboots recorded yet</i>"
+    return lines.join("<br>")
+}
+
+def rebootSettingsPage() {
+    dynamicPage(name: "rebootSettingsPage", title: "Reboot Settings") {
         section("<b>Reboot Settings</b>") {
-            input "memoryThreshold", "number", 
-                title: "Minimum Free Memory Threshold (MB)", 
+            input "memoryThreshold", "number",
+                title: "Minimum Free Memory Threshold (MB)",
                 description: "Reboot when free memory falls below this value",
-                required: true, 
+                required: true,
                 defaultValue: 200,
                 range: "10..500"
-            
+
             input "enableAutoReboot", "bool",
                 title: "Enable Automatic Reboot",
                 description: "Allow app to automatically reboot hub when threshold is reached",
                 defaultValue: false,
                 submitOnChange: true
-            
+
             input "rebuildDatabase", "bool",
                 title: "Rebuild Database on Reboot",
-                description: "Perform database rebuild when rebooting (may take longer)",
+                description: "Perform database rebuild when rebooting (may take longer). Applies to all reboot types.",
                 defaultValue: false
         }
 
         if (enableAutoReboot) {
-            sectionHR()
-
             section("<b>Reboot Time Window</b>") {
                 paragraph "The hub will only reboot within this time window when the memory threshold is reached"
-                
+
                 input "rebootStartTime", "time",
                     title: "Window Start Time",
                     description: "Start of allowed reboot window",
                     required: true
-                
+
                 input "rebootEndTime", "time",
-                    title: "Window End Time", 
+                    title: "Window End Time",
                     description: "End of allowed reboot window",
                     required: true
             }
         }
+    }
+}
 
-        sectionHR()
-
+def eventMonitoringPage() {
+    dynamicPage(name: "eventMonitoringPage", title: "Hub Event Monitoring") {
         section("<b>Hub Event Monitoring</b>") {
             paragraph "Monitor for critical hub events and automatically reboot when detected<br><i>(Critical events are ignored for the first ${STARTUP_GRACE_SECONDS / 60 as int} minutes after hub startup)</i>"
 
@@ -170,7 +243,6 @@ def mainPage() {
                 submitOnChange: true
 
             if (enableEventMonitoring) {
-                paragraph "<div style='margin-left: 20px;'>"
                 input "monitorZigbeeOff", "bool",
                     title: "Monitor for zigbeeOff Event",
                     description: "Reboot when Zigbee radio goes offline",
@@ -185,19 +257,20 @@ def mainPage() {
                     title: "Monitor for severeLoad Event",
                     description: "Reboot when hub experiences severe load",
                     defaultValue: true
-                paragraph "</div>"
             }
         }
+    }
+}
 
-        sectionHR()
-
+def periodicRebootPage() {
+    dynamicPage(name: "periodicRebootPage", title: "Periodic Reboot Schedule") {
         section("<b>Periodic Reboot Schedule</b>") {
             input "enablePeriodicReboot", "bool",
                 title: "Enable Periodic Scheduled Reboot",
                 description: "Reboot hub on a regular schedule",
                 defaultValue: false,
                 submitOnChange: true
-            
+
             if (enablePeriodicReboot) {
                 input "periodicFrequency", "enum",
                     title: "Reboot Frequency",
@@ -224,52 +297,83 @@ def mainPage() {
                     ],
                     required: true,
                     defaultValue: "SUN"
-                
+
                 input "periodicRebootTime", "time",
                     title: "Reboot Time",
                     description: "Time to perform the scheduled reboot",
                     required: true
-                
-                paragraph "<i>The hub is checked every week on the chosen day and time, and only reboots once its uptime " +
-                          "has reached the minimum for the chosen frequency (weekly: 4.9 days, fortnightly: 9.8 days, " +
-                          "monthly: 22 days). A manual or memory-triggered reboot therefore pushes the next scheduled reboot back automatically.</i>"
-                paragraph "<i>Note: Periodic reboots will use the database rebuild setting configured above.</i>"
+
+                input "disableSmartReboot", "bool",
+                    title: "Disable Smart Reboot",
+                    description: "Reboot on the chosen frequency no matter how recently the hub last rebooted",
+                    defaultValue: false,
+                    submitOnChange: true
+
+                if (disableSmartReboot) {
+                    paragraph "<i>Smart Reboot is OFF: the hub reboots every week, every 2 weeks or every 4 weeks " +
+                              "(counted from the last periodic reboot) on the chosen day and time, even if it rebooted " +
+                              "for another reason in between.</i>"
+                } else {
+                    paragraph "<i>Smart Reboot is ON: the hub is checked every week on the chosen day and time, and only reboots once its uptime " +
+                              "has reached the minimum for the chosen frequency (weekly: 4.9 days, fortnightly: 9.8 days, " +
+                              "monthly: 22 days). A manual or memory-triggered reboot therefore pushes the next scheduled reboot back automatically.</i>"
+                }
+                paragraph "<i>Note: Periodic reboots use the database rebuild setting on the Reboot Settings page.</i>"
             }
         }
+    }
+}
 
-        sectionHR()
+/** One-line summaries shown under each settings link on the main page. */
+private String rebootSettingsSummary() {
+    def parts = ["Threshold: ${getMemoryThreshold()} MB"]
+    if (enableAutoReboot) {
+        def window = (rebootStartTime && rebootEndTime) ? " (${formatTimeSetting(rebootStartTime)}-${formatTimeSetting(rebootEndTime)})" : ""
+        parts << "Auto reboot: on${window}"
+    } else {
+        parts << "Auto reboot: off"
+    }
+    parts << "DB rebuild: ${rebuildDatabase ? 'on' : 'off'}"
+    return parts.join(" | ")
+}
 
-        section("<b>Monitoring Schedule</b>") {
-            input "checkInterval", "enum",
-                title: "Memory Check Interval",
-                description: "How often to check memory usage",
-                options: [
-                    "1": "Every 1 minute",
-                    "5": "Every 5 minutes",
-                    "10": "Every 10 minutes",
-                    "15": "Every 15 minutes",
-                    "30": "Every 30 minutes",
-                    "60": "Every 1 hour"
-                ],
-                defaultValue: "15",
-                required: true
-        }
+private String eventMonitoringSummary() {
+    if (!enableEventMonitoring) return "Off"
+    def events = []
+    if (monitorZigbeeOff != false) events << "zigbeeOff"
+    if (monitorZwaveCrashed != false) events << "zwaveCrashed"
+    if (monitorSevereLoad != false) events << "severeLoad"
+    return events ? "On: ${events.join(', ')}" : "On, but no events selected"
+}
 
-        sectionHR()
+private String periodicRebootSummary() {
+    if (!enablePeriodicReboot) return "Off"
+    def freqNames = [weekly: "Weekly", fortnightly: "Fortnightly", monthly: "Monthly"]
+    def desc = "${freqNames[periodicFrequency ?: 'weekly']} on ${getDayName(periodicDayOfWeek ?: 'SUN')}"
+    if (periodicRebootTime) desc += " at ${formatTimeSetting(periodicRebootTime)}"
+    return desc + (disableSmartReboot ? " (fixed schedule)" : " (smart)")
+}
 
-        section("<b>Notifications</b>") {
-            def notifyDesc = notifyDevices ? "Sending to: ${notifyDevices.join(', ')}" : "Not configured - tap to set up"
-            href "notificationPage", title: "Notification Settings", description: notifyDesc
-        }
+/** Formats a "time" input setting as HH:mm in the hub's time zone. */
+private String formatTimeSetting(String timeSetting) {
+    try {
+        return timeToday(timeSetting, location.timeZone).format("HH:mm", location.timeZone)
+    } catch (Exception e) {
+        return "?"
+    }
+}
 
-        sectionHR()
+/** Memory threshold in MB, falling back to the default if the setting was never saved. */
+private int getMemoryThreshold() {
+    return (memoryThreshold ?: 200) as int
+}
 
+def advancedPage() {
+    dynamicPage(name: "advancedPage", title: "Advanced") {
         section("<b>Test Reboot</b>") {
             paragraph "<b>Warning:</b> This will immediately reboot your hub!"
             input "testReboot", "button", title: "Test Reboot Now"
         }
-
-        sectionHR()
 
         section("<b>Logging</b>") {
             input "notifyBeforeReboot", "bool",
@@ -280,43 +384,6 @@ def mainPage() {
             input "enableDebug", "bool",
                 title: "Enable Debug Logging",
                 defaultValue: false
-        }
-
-        sectionHR()
-
-        section("<b>Statistics</b>") {
-            if (state.lastCheck) {
-                paragraph "<b>Last Check:</b> ${new Date(state.lastCheck).format('yyyy-MM-dd HH:mm:ss')}"
-            }
-            if (state.lastReboot) {
-                paragraph "<b>Last Auto Reboot:</b> ${new Date(state.lastReboot).format('yyyy-MM-dd HH:mm:ss')}"
-            }
-            if (state.lastEventReboot) {
-                paragraph "<b>Last Event-Triggered Reboot:</b> ${new Date(state.lastEventReboot).format('yyyy-MM-dd HH:mm:ss')}"
-            }
-            if (state.lastEventType) {
-                paragraph "<b>Last Event Type:</b> ${state.lastEventType}"
-            }
-            if (state.lastPeriodicReboot) {
-                paragraph "<b>Last Periodic Reboot:</b> ${new Date(state.lastPeriodicReboot).format('yyyy-MM-dd HH:mm:ss')}"
-            }
-            if (enablePeriodicReboot && periodicDayOfWeek && periodicRebootTime) {
-                def nextReboot = getNextPeriodicReboot()
-                if (nextReboot) {
-                    state.nextPeriodicReboot = nextReboot.time
-                    paragraph "<b>Next Scheduled Reboot:</b> ${nextReboot.format('yyyy-MM-dd HH:mm:ss', location.timeZone)} " +
-                              "<i>(assuming no other reboot before then)</i>"
-                }
-            }
-            if (state.rebootCount) {
-                paragraph "<b>Total Auto Reboots:</b> ${state.rebootCount}"
-            }
-            if (state.eventRebootCount) {
-                paragraph "<b>Total Event-Triggered Reboots:</b> ${state.eventRebootCount}"
-            }
-            if (state.periodicRebootCount) {
-                paragraph "<b>Total Periodic Reboots:</b> ${state.periodicRebootCount}"
-            }
         }
     }
 }
@@ -431,7 +498,7 @@ def initialize() {
     }
     
     log.info "Memory monitoring initialized - checking every ${interval} minute(s)"
-    log.info "Threshold: ${memoryThreshold} MB free memory"
+    log.info "Threshold: ${getMemoryThreshold()} MB free memory"
     
     if (enableAutoReboot) {
         log.info "Auto-reboot enabled for time window: ${rebootStartTime} to ${rebootEndTime}"
@@ -674,8 +741,8 @@ def checkMemory() {
     logDebug "Memory check - Free: ${memInfo.free} MB, Used: ${memInfo.used} MB (${memInfo.percentUsed}%)"
 
     // Check if we're below threshold
-    if (memInfo.free < memoryThreshold) {
-        log.warn "Free memory (${memInfo.free} MB) is below threshold (${memoryThreshold} MB)"
+    if (memInfo.free < getMemoryThreshold()) {
+        log.warn "Free memory (${memInfo.free} MB) is below threshold (${getMemoryThreshold()} MB)"
 
         if (enableAutoReboot) {
             long uptimeSecs = getUptimeSeconds()
@@ -695,7 +762,7 @@ def checkMemory() {
             log.info "Auto-reboot is disabled - no action taken"
         }
     } else {
-        logDebug "Memory levels OK - ${memInfo.free} MB free (threshold: ${memoryThreshold} MB)"
+        logDebug "Memory levels OK - ${memInfo.free} MB free (threshold: ${getMemoryThreshold()} MB)"
     }
 }
 
@@ -885,7 +952,8 @@ def schedulePeriodicReboot() {
     state.nextPeriodicReboot = nextReboot?.time
 
     log.info "Periodic reboot check scheduled every ${getDayName(periodicDayOfWeek)} at ${rebootTime.format('HH:mm', location.timeZone)} " +
-             "(cron: ${cron}); frequency ${periodicFrequency ?: 'weekly'}, minimum uptime ${formatDays(getRequiredUptimeSeconds())} days"
+             "(cron: ${cron}); frequency ${periodicFrequency ?: 'weekly'}, " +
+             (disableSmartReboot ? "fixed schedule (Smart Reboot disabled)" : "minimum uptime ${formatDays(getRequiredUptimeSeconds())} days")
     if (nextReboot) {
         log.info "Next periodic reboot expected ${nextReboot.format('yyyy-MM-dd HH:mm', location.timeZone)}"
     }
@@ -908,17 +976,29 @@ Date getNextPeriodicReboot() {
     calendar.add(Calendar.DAY_OF_MONTH, daysToAdd)
     if (!calendar.time.after(nowDate)) calendar.add(Calendar.DAY_OF_MONTH, 7)
 
-    long uptimeNow = getUptimeSeconds()
-    long required = getRequiredUptimeSeconds()
-
     // At most 5 weekly occurrences are ever needed (monthly = 4 weeks)
     for (int i = 0; i < 6; i++) {
-        long secsUntil = (long)((calendar.time.time - nowDate.time).intdiv(1000L))
-        long projectedUptime = uptimeNow + secsUntil
-        if (projectedUptime >= required) return calendar.time
+        if (isPeriodicRebootDue(calendar.time.time)) return calendar.time
         calendar.add(Calendar.DAY_OF_MONTH, 7)
     }
     return calendar.time
+}
+
+/**
+ * Whether a weekly check at the given time (epoch ms) would reboot the hub.
+ * Smart Reboot (default): projected uptime must reach the minimum for the frequency.
+ * Smart Reboot disabled: a fixed cadence counted from the last periodic reboot; other
+ * reboots are ignored. One day of slack absorbs DST shifts and late-running jobs.
+ */
+private boolean isPeriodicRebootDue(long atMillis) {
+    if (disableSmartReboot) {
+        Long last = state.lastPeriodicReboot as Long
+        if (!last) return true
+        long minGapMs = (getFrequencyDays() - 1) * 86400000L
+        return (atMillis - last) >= minGapMs
+    }
+    long secsUntil = Math.max(0L, (atMillis - now()).intdiv(1000L) as long)
+    return getUptimeSeconds() + secsUntil >= getRequiredUptimeSeconds()
 }
 
 /**
@@ -943,7 +1023,17 @@ def periodicRebootCheck() {
     long requiredSecs = getRequiredUptimeSeconds()
     def freq = periodicFrequency ?: "weekly"
 
-    if (uptimeSecs < requiredSecs) {
+    if (disableSmartReboot) {
+        if (!isPeriodicRebootDue(now())) {
+            log.info "Periodic reboot check: skipping - fixed ${freq} schedule, last periodic reboot was " +
+                     "${formatDays((now() - (state.lastPeriodicReboot as Long)).intdiv(1000L))} days ago"
+            state.lastPeriodicSkip = now()
+            def nextReboot = getNextPeriodicReboot()
+            state.nextPeriodicReboot = nextReboot?.time
+            if (nextReboot) log.info "Next periodic reboot expected ${nextReboot.format('yyyy-MM-dd HH:mm', location.timeZone)}"
+            return
+        }
+    } else if (uptimeSecs < requiredSecs) {
         log.info "Periodic reboot check: skipping - hub uptime ${formatDays(uptimeSecs)} days is below the ${formatDays(requiredSecs)} days required for ${freq} reboots"
         state.lastPeriodicSkip = now()
         def nextReboot = getNextPeriodicReboot()
